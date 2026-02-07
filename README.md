@@ -48,9 +48,13 @@
 ---
 
 ## 📥 下载
-1. Android 安装包
+1. GitHub Releases（推荐）
 ```text
-https://expo.dev/accounts/ewwwzhi/projects/action-plus/builds/28d95fa7-78f4-4a6e-b143-031eabf7085a
+https://github.com/EwwwzhI/ActionPlus/releases/latest
+```
+1. Android APK 直链（最新发布）
+```text
+https://github.com/EwwwzhI/ActionPlus/releases/latest/download/ActionPlus.apk
 ```
 
 ---
