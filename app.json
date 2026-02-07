@@ -1,0 +1,31 @@
+{
+  "expo": {
+    "name": "Action+",
+    "slug": "action-plus",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "backgroundColor": "#F4EFE6",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "backgroundColor": "#F4EFE6"
+    },
+    "android": {
+      "package": "com.ewwwzhi.rewardplan",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#F4EFE6"
+      },
+      "splash": {
+        "backgroundColor": "#F4EFE6"
+      },
+      "permissions": ["POST_NOTIFICATIONS"]
+    },
+    "owner": "ewwwzhi",
+    "extra": {
+      "eas": {
+        "projectId": "32993c22-070d-4a51-b609-722cd9a0f889"
+      }
+    }
+  }
+}
