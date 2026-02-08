@@ -57,11 +57,6 @@
 ```text
 https://github.com/EwwwzhI/ActionPlus/releases/latest
 ```
-1. Android APK 直链（最新发布）
-```text
-https://github.com/EwwwzhI/ActionPlus/releases/latest/download/ActionPlus.apk
-```
-
 ---
 
 ## 🤝 开源与贡献
