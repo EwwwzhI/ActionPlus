@@ -5,6 +5,7 @@ import {
   DEFAULT_GROUP,
   DEFAULT_GROUP_ID,
   AutoRule,
+  NotificationSettings,
   PlanType,
   ScoreArchive,
   Task,
@@ -28,9 +29,13 @@ function formatLocalDate(date: Date): string {
 function normalizeTask(raw: unknown, todayKey: string, groupIds: Set<string>): Task | null {
   if (!raw || typeof raw !== "object") return null;
   const data = raw as Partial<Task> & { points?: number };
+  const rawPlanType = (raw as { planType?: unknown }).planType;
   if (typeof data.id !== "string" || typeof data.title !== "string") return null;
-  let planType = PLAN_TYPES.includes(data.planType as PlanType) ? (data.planType as PlanType) : "daily";
-  if (data.planType === "weekly" || data.planType === "monthly") {
+  let planType =
+    typeof rawPlanType === "string" && PLAN_TYPES.includes(rawPlanType as PlanType)
+      ? (rawPlanType as PlanType)
+      : "daily";
+  if (rawPlanType === "weekly" || rawPlanType === "monthly") {
     planType = "longterm";
   }
   const createdAt = Number.isFinite(data.createdAt) ? Number(data.createdAt) : Date.now();
@@ -40,20 +45,28 @@ function normalizeTask(raw: unknown, todayKey: string, groupIds: Set<string>): T
   const earnedPoints = earnedRaw === null ? null : Math.min(maxPoints, Math.max(0, Math.round(earnedRaw)));
   const settledAt = Number.isFinite(data.settledAt) ? Number(data.settledAt) : null;
   const note = typeof data.note === "string" ? data.note.trim() : undefined;
+  const rawDetailNote = (raw as { detailNote?: unknown }).detailNote;
+  const detailNote = typeof rawDetailNote === "string" ? rawDetailNote.trim() : undefined;
   const completed = Boolean(data.completed);
   const targetDate =
     planType === "daily" && typeof data.targetDate === "string" ? data.targetDate : planType === "daily" ? todayKey : undefined;
   const groupId =
     typeof data.groupId === "string" && groupIds.has(data.groupId) ? data.groupId : DEFAULT_GROUP_ID;
+  const sourceTemplateId =
+    typeof (raw as { sourceTemplateId?: unknown }).sourceTemplateId === "string"
+      ? (raw as { sourceTemplateId?: string }).sourceTemplateId
+      : undefined;
   return {
     id: data.id,
     title: data.title,
     groupId,
     planType,
+    sourceTemplateId,
     maxPoints,
     earnedPoints,
     settledAt,
     note: note || undefined,
+    detailNote: detailNote || undefined,
     completed,
     targetDate,
     createdAt
@@ -116,6 +129,26 @@ function normalizeArchiveSettings(raw: unknown): ArchiveSettings {
   return { cycleDays, periodStart };
 }
 
+function normalizeNotificationSettings(raw: unknown, tasks: Task[]): NotificationSettings {
+  if (!raw || typeof raw !== "object") {
+    return initialState.notificationSettings;
+  }
+  const data = raw as Partial<NotificationSettings>;
+  const enabled = typeof data.enabled === "boolean" ? data.enabled : true;
+  const hour = Number.isFinite(data.hour) ? Math.min(23, Math.max(0, Math.round(Number(data.hour)))) : 8;
+  const minute = Number.isFinite(data.minute)
+    ? Math.min(59, Math.max(0, Math.round(Number(data.minute))))
+    : 0;
+  const taskIdsRaw = Array.isArray(data.taskIds) ? data.taskIds : [];
+  const validTaskIdSet = new Set(tasks.map((task) => task.id));
+  const taskIds = Array.from(
+    new Set(
+      taskIdsRaw.filter((id): id is string => typeof id === "string" && validTaskIdSet.has(id))
+    )
+  );
+  return { enabled, hour, minute, taskIds };
+}
+
 export async function loadState(): Promise<AppState> {
   try {
     const raw = await AsyncStorage.getItem(STATE_KEY);
@@ -153,7 +186,11 @@ export async function loadState(): Promise<AppState> {
       templates: normalizedTemplates,
       groups: finalGroups,
       archives,
-      archiveSettings: normalizeArchiveSettings((data as { archiveSettings?: unknown }).archiveSettings)
+      archiveSettings: normalizeArchiveSettings((data as { archiveSettings?: unknown }).archiveSettings),
+      notificationSettings: normalizeNotificationSettings(
+        (data as { notificationSettings?: unknown }).notificationSettings,
+        tasks
+      )
     };
   } catch (error) {
     return initialState;

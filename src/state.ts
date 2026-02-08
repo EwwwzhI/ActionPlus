@@ -6,6 +6,8 @@ export type Task = {
   title: string;
   groupId: string;
   planType: PlanType;
+  sourceTemplateId?: string;
+  detailNote?: string;
   maxPoints: number;
   earnedPoints: number | null;
   settledAt?: number | null;
@@ -25,6 +27,13 @@ export type TaskGroup = {
 export type ArchiveSettings = {
   cycleDays: number;
   periodStart: string | null;
+};
+
+export type NotificationSettings = {
+  enabled: boolean;
+  hour: number;
+  minute: number;
+  taskIds: string[];
 };
 
 export type ScoreArchive = {
@@ -61,6 +70,7 @@ export type AppState = {
   groups: TaskGroup[];
   archives: ScoreArchive[];
   archiveSettings: ArchiveSettings;
+  notificationSettings: NotificationSettings;
 };
 
 export const initialState: AppState = {
@@ -69,7 +79,13 @@ export const initialState: AppState = {
   templates: [],
   groups: [DEFAULT_GROUP],
   archives: [],
-  archiveSettings: { cycleDays: 30, periodStart: null }
+  archiveSettings: { cycleDays: 30, periodStart: null },
+  notificationSettings: {
+    enabled: true,
+    hour: 8,
+    minute: 0,
+    taskIds: []
+  }
 };
 
 export type Action =
@@ -78,6 +94,7 @@ export type Action =
   | { type: "RENAME_GROUP"; groupId: string; name: string; color?: string }
   | { type: "DELETE_GROUP"; groupId: string }
   | { type: "SET_ARCHIVE_CYCLE"; cycleDays: number; periodStart: string }
+  | { type: "SET_NOTIFICATION_SETTINGS"; enabled: boolean; hour: number; minute: number; taskIds: string[] }
   | { type: "AUTO_ARCHIVE"; cycleDays: number; nextStart: string; endDate: string }
   | { type: "ADD_TASK"; task: Task }
   | { type: "TOGGLE_TASK"; taskId: string }
@@ -149,6 +166,21 @@ export function reducer(state: AppState, action: Action): AppState {
         archiveSettings: {
           cycleDays,
           periodStart
+        }
+      };
+    }
+    case "SET_NOTIFICATION_SETTINGS": {
+      const enabled = Boolean(action.enabled);
+      const hour = Math.min(23, Math.max(0, Math.round(action.hour)));
+      const minute = Math.min(59, Math.max(0, Math.round(action.minute)));
+      const taskIds = Array.from(new Set(action.taskIds.filter((id) => typeof id === "string" && id)));
+      return {
+        ...state,
+        notificationSettings: {
+          enabled,
+          hour,
+          minute,
+          taskIds
         }
       };
     }
@@ -253,7 +285,15 @@ export function reducer(state: AppState, action: Action): AppState {
       const earnedValue =
         target?.earnedPoints ?? (target && target.completed ? target.maxPoints : 0);
       const points = target ? clampPoints(state.points - earnedValue) : state.points;
-      return { ...state, tasks, points };
+      return {
+        ...state,
+        tasks,
+        points,
+        notificationSettings: {
+          ...state.notificationSettings,
+          taskIds: state.notificationSettings.taskIds.filter((taskId) => taskId !== action.taskId)
+        }
+      };
     }
     case "CLEANUP_OLD_RECORDS": {
       const cutoffDate = action.cutoffDate.trim();

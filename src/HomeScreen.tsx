@@ -101,13 +101,17 @@ function parseDateKey(dateKey: string): Date | null {
   return startOfDay(date);
 }
 
-function buildTaskListMessage(tasks: Task[]): { title: string; body: string } {
+function buildReminderMessage(tasks: Task[]): { title: string; body: string } {
   if (tasks.length === 0) {
-    return { title: "任务清单", body: "今日暂无任务" };
+    return { title: "任务提醒", body: "暂无已选择的提醒任务" };
   }
   const preview = tasks.slice(0, 3).map((task) => `• ${task.title}`).join("\n");
   const suffix = tasks.length > 3 ? `\n等 ${tasks.length} 项` : `\n共 ${tasks.length} 项`;
-  return { title: "任务清单", body: `${preview}${suffix}` };
+  return { title: "任务提醒", body: `${preview}${suffix}` };
+}
+
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
 }
 
 export function HomeScreen() {
@@ -120,6 +124,8 @@ export function HomeScreen() {
   const [groupModalColor, setGroupModalColor] = useState(GROUP_COLORS[0].value);
   const [taskTitle, setTaskTitle] = useState("");
   const [taskPoints, setTaskPoints] = useState("");
+  const [taskDetailNote, setTaskDetailNote] = useState("");
+  const [isCreateTemplateDropdownOpen, setIsCreateTemplateDropdownOpen] = useState(false);
   const [dailyTargetKey, setDailyTargetKey] = useState(() => formatLocalDate(addDays(new Date(), 1)));
   const [earnedDrafts, setEarnedDrafts] = useState<Record<string, string>>({});
   const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
@@ -130,6 +136,11 @@ export function HomeScreen() {
   const [templateTab, setTemplateTab] = useState<PlanType>("daily");
   const [isArchiveOpen, setIsArchiveOpen] = useState(false);
   const [archiveDaysDraft, setArchiveDaysDraft] = useState("30");
+  const [isReminderOpen, setIsReminderOpen] = useState(false);
+  const [reminderEnabledDraft, setReminderEnabledDraft] = useState(true);
+  const [reminderHourDraft, setReminderHourDraft] = useState("08");
+  const [reminderMinuteDraft, setReminderMinuteDraft] = useState("00");
+  const [reminderTaskIdsDraft, setReminderTaskIdsDraft] = useState<string[]>([]);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [isDayDetailOpen, setIsDayDetailOpen] = useState(false);
   const [selectedDateKey, setSelectedDateKey] = useState<string | null>(null);
@@ -258,6 +269,28 @@ export function HomeScreen() {
 
   const archives = useMemo(() => state.archives ?? [], [state.archives]);
   const archiveSettings = state.archiveSettings ?? { cycleDays: 30, periodStart: null };
+  const notificationSettings = state.notificationSettings ?? {
+    enabled: true,
+    hour: 8,
+    minute: 0,
+    taskIds: []
+  };
+  const reminderTaskOptions = useMemo(() => {
+    return [...allTasks]
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map((task) => ({
+        id: task.id,
+        title: task.title,
+        planType: task.planType,
+        groupId: task.groupId,
+        maxPoints: task.maxPoints
+      }));
+  }, [allTasks]);
+  const selectedReminderTasks = useMemo(() => {
+    if (!notificationSettings.taskIds.length) return [];
+    const idSet = new Set(notificationSettings.taskIds);
+    return allTasks.filter((task) => idSet.has(task.id));
+  }, [allTasks, notificationSettings.taskIds]);
   const retentionDays = 120;
   const cutoffDateKey = useMemo(
     () => formatLocalDate(addDays(new Date(), -(retentionDays - 1))),
@@ -325,30 +358,34 @@ export function HomeScreen() {
       const existing = await Notifications.getAllScheduledNotificationsAsync();
       await Promise.all(
         existing
-          .filter((item) => item.content?.data?.type === "daily_task_list")
+          .filter((item) => item.content?.data?.type === "task_reminder")
           .map((item) => Notifications.cancelScheduledNotificationAsync(item.identifier))
       );
-      const todayDate = new Date();
-      const triggerDate = new Date(
-        todayDate.getFullYear(),
-        todayDate.getMonth(),
-        todayDate.getDate(),
-        8,
-        0,
-        0
-      );
-      const message = buildTaskListMessage(todayTasks);
+      if (!notificationSettings.enabled) return;
+      if (selectedReminderTasks.length === 0) return;
+      const message = buildReminderMessage(selectedReminderTasks);
       await Notifications.scheduleNotificationAsync({
         content: {
           title: message.title,
           body: message.body,
-          data: { type: "daily_task_list", date: todayKey }
+          data: { type: "task_reminder", taskIds: notificationSettings.taskIds }
         },
-        trigger: triggerDate
+        trigger: {
+          hour: notificationSettings.hour,
+          minute: notificationSettings.minute,
+          repeats: true
+        }
       });
     };
     schedule();
-  }, [isReady, todayTasks, todayKey]);
+  }, [
+    isReady,
+    selectedReminderTasks,
+    notificationSettings.hour,
+    notificationSettings.minute,
+    notificationSettings.enabled,
+    notificationSettings.taskIds
+  ]);
 
   useEffect(() => {
     if (!isReady) return;
@@ -375,6 +412,7 @@ export function HomeScreen() {
         title: template.title,
         groupId: template.groupId,
         planType: "daily",
+        sourceTemplateId: template.id,
         maxPoints: template.maxPoints,
         earnedPoints: null,
         completed: false,
@@ -402,6 +440,10 @@ export function HomeScreen() {
   const longtermTemplates = useMemo(
     () => templates.filter((item) => item.planType === "longterm"),
     [templates]
+  );
+  const createTaskTemplates = useMemo(
+    () => (newTaskType === "daily" ? dailyTemplates : longtermTemplates),
+    [newTaskType, dailyTemplates, longtermTemplates]
   );
 
   const longtermSettledCount = orderedLongtermTasks.filter((task) => task.earnedPoints !== null).length;
@@ -491,7 +533,10 @@ export function HomeScreen() {
         });
       }
     }
-    const maxScore = Math.max(1, ...cells.map((cell) => cell.score));
+    const positiveScores = cells
+      .filter((cell) => cell.isCurrentMonth && cell.score > 0)
+      .map((cell) => cell.score);
+    const maxScore = positiveScores.length > 0 ? Math.max(...positiveScores) : 0;
     return { cells, monthLabel: `${year}-${String(month + 1).padStart(2, "0")}`, maxScore };
   }, [dailyScoreMap]);
 
@@ -537,6 +582,7 @@ export function HomeScreen() {
   }
 
   function handleAddTask() {
+    const detailNote = taskDetailNote.trim() || undefined;
     const title = taskTitle.trim();
     const points = parsePositiveInt(taskPoints);
     if (!title || points === null) {
@@ -552,6 +598,7 @@ export function HomeScreen() {
       title,
       groupId: activeGroup.id,
       planType: newTaskType,
+      detailNote,
       maxPoints: points,
       earnedPoints: null,
       completed: false,
@@ -561,7 +608,16 @@ export function HomeScreen() {
     dispatch({ type: "ADD_TASK", task });
     setTaskTitle("");
     setTaskPoints("");
+    setTaskDetailNote("");
+    setIsCreateTemplateDropdownOpen(false);
     setIsTaskModalOpen(false);
+  }
+
+  function handlePickCreateTemplate(template: TaskTemplate) {
+    setTaskTitle(template.title);
+    setTaskPoints(String(template.maxPoints));
+    setActiveGroupId(template.groupId);
+    setIsCreateTemplateDropdownOpen(false);
   }
 
   function openGroupModal(mode: "create" | "rename") {
@@ -610,6 +666,14 @@ export function HomeScreen() {
     setIsArchiveOpen(true);
   }
 
+  function openReminderModal() {
+    setReminderEnabledDraft(notificationSettings.enabled);
+    setReminderHourDraft(pad2(notificationSettings.hour));
+    setReminderMinuteDraft(pad2(notificationSettings.minute));
+    setReminderTaskIdsDraft(notificationSettings.taskIds);
+    setIsReminderOpen(true);
+  }
+
   function handleSaveArchiveSettings() {
     const parsed = Number(archiveDaysDraft);
     if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -619,6 +683,30 @@ export function HomeScreen() {
     const cycleDays = Math.max(1, Math.round(parsed));
     dispatch({ type: "SET_ARCHIVE_CYCLE", cycleDays, periodStart: todayKey });
     setIsArchiveOpen(false);
+  }
+
+  function handleSaveReminderSettings() {
+    const hourParsed = Number(reminderHourDraft);
+    const minuteParsed = Number(reminderMinuteDraft);
+    if (
+      !Number.isFinite(hourParsed) ||
+      !Number.isFinite(minuteParsed) ||
+      hourParsed < 0 ||
+      hourParsed > 23 ||
+      minuteParsed < 0 ||
+      minuteParsed > 59
+    ) {
+      Alert.alert("输入有误", "提醒时间请输入 00:00 到 23:59");
+      return;
+    }
+    dispatch({
+      type: "SET_NOTIFICATION_SETTINGS",
+      enabled: reminderEnabledDraft,
+      hour: Math.round(hourParsed),
+      minute: Math.round(minuteParsed),
+      taskIds: reminderTaskIdsDraft
+    });
+    setIsReminderOpen(false);
   }
 
   function handleDeleteGroup() {
@@ -667,6 +755,12 @@ export function HomeScreen() {
     }
   }
 
+  function toggleReminderTask(taskId: string) {
+    setReminderTaskIdsDraft((prev) =>
+      prev.includes(taskId) ? prev.filter((id) => id !== taskId) : [...prev, taskId]
+    );
+  }
+
   function isTemplateSaved(task: Task): boolean {
     return templates.some(
       (item) =>
@@ -678,8 +772,12 @@ export function HomeScreen() {
   }
 
   function handleSaveTemplate(task: Task) {
+    if (task.sourceTemplateId) {
+      Alert.alert("无法保存", "该任务来自任务库，不支持再次保存");
+      return;
+    }
     if (isTemplateSaved(task)) {
-      Alert.alert("已在任务库中", "该任务已保存到任务库");
+      Alert.alert("无需重复保存", "该任务已在任务库中，不允许重复保存");
       return;
     }
     const template: TaskTemplate = {
@@ -691,22 +789,6 @@ export function HomeScreen() {
       createdAt: Date.now()
     };
     dispatch({ type: "ADD_TEMPLATE", template });
-  }
-
-  function handleUseTemplate(template: TaskTemplate) {
-    const task: Task = {
-      id: makeId("task"),
-      title: template.title,
-      groupId: template.groupId,
-      planType: template.planType,
-      maxPoints: template.maxPoints,
-      earnedPoints: null,
-      completed: false,
-      targetDate: template.planType === "daily" ? tomorrowKey : undefined,
-      createdAt: Date.now()
-    };
-    dispatch({ type: "ADD_TASK", task });
-    setIsTemplatePickerOpen(false);
   }
 
   function escapeCsvValue(value: string | number): string {
@@ -814,6 +896,7 @@ export function HomeScreen() {
   }
 
   const canAddTask = taskTitle.trim().length > 0 && parsePositiveInt(taskPoints) !== null;
+  const canSubmitGroupModal = groupModalName.trim().length > 0;
   const taskPointsLabel = "Reward 上限";
 
   const rewardTranslate = rewardAnim.interpolate({
@@ -850,7 +933,14 @@ export function HomeScreen() {
           <View style={styles.profileRight}>
             <View style={styles.profileRow}>
               <Text style={styles.profileLabel}>当日积分</Text>
-              <Text style={styles.profileValue}>{todayPoints}</Text>
+              <View style={styles.profileValueRow}>
+                <Text style={styles.profileValue}>{todayPoints}</Text>
+                <View style={styles.profileActions}>
+                  <Pressable onPress={openReminderModal} style={pressable(styles.profileAction)}>
+                    <Text style={styles.profileActionText}>提醒</Text>
+                  </Pressable>
+                </View>
+              </View>
             </View>
             <View style={styles.profileRow}>
               <Text style={styles.profileLabel}>累计积分</Text>
@@ -952,7 +1042,14 @@ export function HomeScreen() {
                 </View>
               ) : null}
             </View>
-            <Pressable style={pressable(styles.iconButton)} onPress={() => setIsTaskModalOpen(true)}>
+            <Pressable
+              style={pressable(styles.iconButton)}
+              onPress={() => {
+                setTaskDetailNote("");
+                setIsCreateTemplateDropdownOpen(false);
+                setIsTaskModalOpen(true);
+              }}
+            >
               <Text style={styles.iconText}>+</Text>
             </Pressable>
           </View>
@@ -1010,6 +1107,11 @@ export function HomeScreen() {
                   <View style={styles.taskMainColumn}>
                     <Text style={styles.taskTitle}>{task.title}</Text>
                     <Text style={styles.taskMeta}>{`最高 ${task.maxPoints} 分 · 任务组 ${getGroupName(task.groupId)}`}</Text>
+                    {task.detailNote ? (
+                      <View style={styles.noteStrip}>
+                        <Text style={styles.noteStripText}>{task.detailNote}</Text>
+                      </View>
+                    ) : null}
                   </View>
                   <Pressable onPress={() => handleSaveTemplate(task)} style={pressable(styles.linkButton)}>
                     <Text style={styles.linkText}>保存</Text>
@@ -1062,6 +1164,11 @@ export function HomeScreen() {
                     <Text
                       style={styles.taskMeta}
                     >{`最高 ${task.maxPoints} 分 · ${dateHint} · 任务组 ${getGroupName(task.groupId)}`}</Text>
+                    {task.detailNote ? (
+                      <View style={styles.noteStrip}>
+                        <Text style={styles.noteStripText}>{task.detailNote}</Text>
+                      </View>
+                    ) : null}
                     <Text style={styles.statusText}>{statusText}</Text>
                   </View>
                   <View style={styles.settleControls}>
@@ -1080,21 +1187,6 @@ export function HomeScreen() {
                       style={pressable([styles.button, styles.buttonTiny])}
                     >
                       <Text style={styles.buttonText}>确认</Text>
-                    </Pressable>
-                    <Pressable onPress={() => handleSaveTemplate(task)} style={pressable(styles.linkButton)}>
-                      <Text style={styles.linkText}>保存</Text>
-                    </Pressable>
-                    <Pressable
-                      onPress={() =>
-                        setConfirmState({
-                          title: "删除任务",
-                          message: "确定删除该任务",
-                          action: { type: "deleteTask", taskId: task.id }
-                        })
-                      }
-                      style={pressable(styles.linkButton)}
-                    >
-                      <Text style={styles.linkTextDanger}>删除</Text>
                     </Pressable>
                   </View>
                   <TextInput
@@ -1130,6 +1222,11 @@ export function HomeScreen() {
                   <View style={styles.settleMain}>
                     <Text style={styles.taskTitle}>{task.title}</Text>
                     <Text style={styles.taskMeta}>{`最高 ${task.maxPoints} 分 · 任务组 ${getGroupName(task.groupId)}`}</Text>
+                    {task.detailNote ? (
+                      <View style={styles.noteStrip}>
+                        <Text style={styles.noteStripText}>{task.detailNote}</Text>
+                      </View>
+                    ) : null}
                     <Text style={styles.statusText}>{statusText}</Text>
                   </View>
                   <View style={styles.settleControls}>
@@ -1279,10 +1376,16 @@ export function HomeScreen() {
                   if (!cell.isCurrentMonth || cell.dayNumber === null) {
                     return <View key={cell.key} style={styles.calendarCell} />;
                   }
-                  const ratio = cell.score / calendarData.maxScore;
+                  const ratio =
+                    calendarData.maxScore > 0 && cell.score > 0 ? cell.score / calendarData.maxScore : 0;
+                  const normalizedRatio = Math.max(0, Math.min(1, ratio));
+                  const intensity =
+                    cell.score <= 0 ? 0 : 0.2 + 0.8 * Math.pow(normalizedRatio, 0.85);
                   const heatColor =
-                    cell.score <= 0 ? theme.colors.background : hexToRgba(activeGroupColor, 0.18 + ratio * 0.72);
-                  const textColor = ratio > 0.55 ? "#FFFFFF" : theme.colors.text;
+                    intensity === 0
+                      ? theme.colors.background
+                      : hexToRgba(activeGroupColor, 0.16 + intensity * 0.82);
+                  const textColor = intensity >= 0.6 ? "#FFFFFF" : theme.colors.text;
                   return (
                     <Pressable
                       key={cell.key}
@@ -1292,7 +1395,13 @@ export function HomeScreen() {
                       <View
                         style={[
                           styles.dayCircle,
-                          { backgroundColor: heatColor, borderColor: hexToRgba(activeGroupColor, 0.6) }
+                          {
+                            backgroundColor: heatColor,
+                            borderColor:
+                              intensity === 0
+                                ? theme.colors.border
+                                : hexToRgba(activeGroupColor, 0.45 + intensity * 0.4)
+                          }
                         ]}
                       >
                         <Text style={[styles.dayText, { color: textColor }]}>{cell.dayNumber}</Text>
@@ -1308,7 +1417,7 @@ export function HomeScreen() {
       </ScrollView>
 
       <Pressable style={pressable(styles.fab)} onPress={() => setIsTemplatePickerOpen(true)}>
-        <Text style={styles.fabText}>+</Text>
+        <Text style={styles.fabText}>🏬</Text>
       </Pressable>
 
       <Modal visible={isTemplatePickerOpen} transparent animationType="fade">
@@ -1350,13 +1459,6 @@ export function HomeScreen() {
                         style={styles.taskMeta}
                       >{`最高 ${template.maxPoints} 分 · 任务组 ${getGroupName(template.groupId)}`}</Text>
                     </View>
-                    <Pressable
-                      onPress={() => handleUseTemplate(template)}
-                      style={pressable(styles.actionIconButton)}
-                      accessibilityLabel="加入明日"
-                    >
-                      <Text style={styles.actionIconText}>🗓</Text>
-                    </Pressable>
                     <Pressable
                       onPress={() =>
                         dispatch({
@@ -1412,13 +1514,6 @@ export function HomeScreen() {
                         style={styles.taskMeta}
                       >{`最高 ${template.maxPoints} 分 · 任务组 ${getGroupName(template.groupId)}`}</Text>
                     </View>
-                    <Pressable
-                      onPress={() => handleUseTemplate(template)}
-                      style={pressable(styles.actionIconButton)}
-                      accessibilityLabel="创建长期"
-                    >
-                      <Text style={styles.actionIconText}>＋</Text>
-                    </Pressable>
                     <Pressable
                       onPress={() =>
                         setConfirmState({
@@ -1476,7 +1571,11 @@ export function HomeScreen() {
                 );
               })}
             </View>
-            <Pressable onPress={handleSubmitGroupModal} style={pressable(styles.button)}>
+            <Pressable
+              onPress={handleSubmitGroupModal}
+              disabled={!canSubmitGroupModal}
+              style={pressable([styles.button, !canSubmitGroupModal && styles.buttonDisabled])}
+            >
               <Text style={styles.buttonText}>{groupModalMode === "create" ? "创建" : "保存"}</Text>
             </Pressable>
           </View>
@@ -1518,6 +1617,80 @@ export function HomeScreen() {
               })}
             </View>
             <Pressable onPress={handleSaveArchiveSettings} style={pressable(styles.button)}>
+              <Text style={styles.buttonText}>保存设置</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={isReminderOpen} transparent animationType="fade">
+        <View style={styles.modalBackdrop}>
+          <Pressable style={styles.modalBackdropPress} onPress={() => setIsReminderOpen(false)} />
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.sectionTitle}>通知设置</Text>
+              <Pressable onPress={() => setIsReminderOpen(false)} style={pressable(styles.linkButton)}>
+                <Text style={styles.linkText}>关闭</Text>
+              </Pressable>
+            </View>
+            <Pressable
+              onPress={() => setReminderEnabledDraft((prev) => !prev)}
+              style={pressable([styles.toggleRow, reminderEnabledDraft && styles.toggleRowActive])}
+            >
+              <Text style={styles.taskTitle}>开启提醒</Text>
+              <View style={[styles.togglePill, reminderEnabledDraft && styles.togglePillActive]}>
+                <Text style={[styles.togglePillText, reminderEnabledDraft && styles.togglePillTextActive]}>
+                  {reminderEnabledDraft ? "开" : "关"}
+                </Text>
+              </View>
+            </Pressable>
+            <Text style={styles.sectionMeta}>{`当前提醒时间 ${pad2(notificationSettings.hour)}:${pad2(notificationSettings.minute)}`}</Text>
+            <View style={[styles.reminderTimeRow, !reminderEnabledDraft && styles.sectionDisabled]}>
+              <TextInput
+                value={reminderHourDraft}
+                onChangeText={setReminderHourDraft}
+                placeholder="时"
+                placeholderTextColor={theme.colors.muted}
+                keyboardType="number-pad"
+                style={[styles.input, styles.inputSmall]}
+              />
+              <Text style={styles.sectionTitle}>:</Text>
+              <TextInput
+                value={reminderMinuteDraft}
+                onChangeText={setReminderMinuteDraft}
+                placeholder="分"
+                placeholderTextColor={theme.colors.muted}
+                keyboardType="number-pad"
+                style={[styles.input, styles.inputSmall]}
+              />
+            </View>
+            <Text style={[styles.sectionTitle, !reminderEnabledDraft && styles.muted]}>选择需要提醒的任务</Text>
+            <Text style={[styles.sectionMeta, !reminderEnabledDraft && styles.muted]}>可多选</Text>
+            <ScrollView style={[styles.reminderList, !reminderEnabledDraft && styles.sectionDisabled]}>
+              {reminderTaskOptions.length === 0 ? (
+                <Text style={styles.muted}>暂无可提醒任务</Text>
+              ) : (
+                reminderTaskOptions.map((task) => {
+                  const checked = reminderTaskIdsDraft.includes(task.id);
+                  return (
+                    <Pressable
+                      key={task.id}
+                      onPress={() => toggleReminderTask(task.id)}
+                      style={pressable([styles.reminderTaskRow, checked && styles.reminderTaskRowActive])}
+                    >
+                      <View style={[styles.reminderTaskCheck, checked && styles.reminderTaskCheckActive]} />
+                      <View style={styles.taskMainColumn}>
+                        <Text style={styles.taskTitle}>{task.title}</Text>
+                        <Text style={styles.taskMeta}>
+                          {`${task.planType === "daily" ? "每日任务" : "长期任务"} · 最高 ${task.maxPoints} 分 · 任务组 ${getGroupName(task.groupId)}`}
+                        </Text>
+                      </View>
+                    </Pressable>
+                  );
+                })
+              )}
+            </ScrollView>
+            <Pressable onPress={handleSaveReminderSettings} style={pressable(styles.button)}>
               <Text style={styles.buttonText}>保存设置</Text>
             </Pressable>
           </View>
@@ -1634,17 +1807,17 @@ export function HomeScreen() {
                   </View>
                 ) : null}
               </View>
-              <Pressable onPress={() => setIsTaskModalOpen(false)} style={pressable(styles.linkButton)}>
+              <Pressable
+                onPress={() => {
+                  setTaskDetailNote("");
+                  setIsCreateTemplateDropdownOpen(false);
+                  setIsTaskModalOpen(false);
+                }}
+                style={pressable(styles.linkButton)}
+              >
                 <Text style={styles.linkText}>关闭</Text>
               </Pressable>
             </View>
-            <TextInput
-              value={taskTitle}
-              onChangeText={setTaskTitle}
-              placeholder="任务名称"
-              placeholderTextColor={theme.colors.muted}
-              style={styles.input}
-            />
             <View style={styles.typeRow}>
               {TASK_TYPE_OPTIONS.map((type) => {
                 const isActive = newTaskType === type;
@@ -1666,6 +1839,49 @@ export function HomeScreen() {
                 );
               })}
             </View>
+            <View style={styles.taskNameRow}>
+              <TextInput
+                value={taskTitle}
+                onChangeText={setTaskTitle}
+                placeholder="任务名称"
+                placeholderTextColor={theme.colors.muted}
+                style={[styles.input, styles.inputFlex]}
+              />
+              <Pressable
+                onPress={() => setIsCreateTemplateDropdownOpen((prev) => !prev)}
+                style={pressable(styles.templatePickButton)}
+              >
+                <Text style={styles.templatePickIcon}>🏬</Text>
+              </Pressable>
+            </View>
+            {isCreateTemplateDropdownOpen ? (
+              <View style={styles.dropdownPanel}>
+                <ScrollView nestedScrollEnabled style={styles.dropdownScroll}>
+                  {createTaskTemplates.length === 0 ? (
+                    <Text style={styles.muted}>当前类型暂无任务库内容</Text>
+                  ) : (
+                    createTaskTemplates.map((template) => (
+                      <Pressable
+                        key={template.id}
+                        onPress={() => handlePickCreateTemplate(template)}
+                        style={pressable(styles.dropdownItem)}
+                      >
+                        <Text style={styles.taskTitle}>{template.title}</Text>
+                        <Text style={styles.taskMeta}>{`最高 ${template.maxPoints} 分 · 任务组 ${getGroupName(template.groupId)}`}</Text>
+                      </Pressable>
+                    ))
+                  )}
+                </ScrollView>
+              </View>
+            ) : null}
+            <TextInput
+              value={taskDetailNote}
+              onChangeText={setTaskDetailNote}
+              placeholder="任务便签（可选，用于记录细节）"
+              placeholderTextColor={theme.colors.muted}
+              multiline
+              style={[styles.input, styles.inputNoteDraft]}
+            />
             {newTaskType === "daily" ? (
               <>
                 <View style={styles.typeRow}>
@@ -1976,6 +2192,79 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: theme.spacing.sm
   },
+  reminderTimeRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing.sm,
+    marginBottom: theme.spacing.sm
+  },
+  toggleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: theme.radius.md,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
+    marginBottom: theme.spacing.sm,
+    backgroundColor: theme.colors.background
+  },
+  toggleRowActive: {
+    borderColor: theme.colors.accent,
+    backgroundColor: theme.colors.accentSoft
+  },
+  togglePill: {
+    minWidth: 44,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    paddingVertical: 4,
+    alignItems: "center",
+    backgroundColor: theme.colors.surface
+  },
+  togglePillActive: {
+    borderColor: theme.colors.accent,
+    backgroundColor: theme.colors.accent
+  },
+  togglePillText: {
+    fontSize: theme.font.sm,
+    color: theme.colors.muted,
+    fontWeight: "700"
+  },
+  togglePillTextActive: {
+    color: "#FFFFFF"
+  },
+  sectionDisabled: {
+    opacity: 0.5
+  },
+  reminderList: {
+    maxHeight: 260,
+    marginTop: theme.spacing.sm,
+    marginBottom: theme.spacing.sm
+  },
+  reminderTaskRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: theme.spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: theme.colors.border
+  },
+  reminderTaskRowActive: {
+    backgroundColor: theme.colors.accentSoft
+  },
+  reminderTaskCheck: {
+    width: 16,
+    height: 16,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    marginRight: theme.spacing.sm
+  },
+  reminderTaskCheckActive: {
+    backgroundColor: theme.colors.accent,
+    borderColor: theme.colors.accent
+  },
   typeRow: {
     flexDirection: "row",
     gap: theme.spacing.sm,
@@ -2021,9 +2310,53 @@ const styles = StyleSheet.create({
     flex: 1,
     marginBottom: 0
   },
+  inputFlex: {
+    flex: 1,
+    marginBottom: 0
+  },
+  taskNameRow: {
+    flexDirection: "row",
+    gap: theme.spacing.sm,
+    alignItems: "center",
+    marginBottom: theme.spacing.sm
+  },
+  templatePickButton: {
+    width: 44,
+    height: 44,
+    borderRadius: theme.radius.md,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: theme.colors.background
+  },
+  templatePickIcon: {
+    fontSize: 18
+  },
+  dropdownPanel: {
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: theme.radius.md,
+    backgroundColor: theme.colors.surface,
+    marginBottom: theme.spacing.sm,
+    overflow: "hidden"
+  },
+  dropdownScroll: {
+    maxHeight: 220
+  },
+  dropdownItem: {
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: theme.colors.border
+  },
   inputTiny: {
     width: 84,
     marginBottom: 0
+  },
+  inputNoteDraft: {
+    minHeight: 72,
+    textAlignVertical: "top"
   },
   inputNote: {
     marginBottom: 0,
@@ -2073,6 +2406,20 @@ const styles = StyleSheet.create({
     fontSize: theme.font.sm,
     color: theme.colors.muted,
     marginTop: 2
+  },
+  noteStrip: {
+    marginTop: 6,
+    backgroundColor: theme.colors.accentSoft,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: theme.radius.sm,
+    paddingHorizontal: 8,
+    paddingVertical: 6
+  },
+  noteStripText: {
+    fontSize: theme.font.sm,
+    color: theme.colors.text,
+    lineHeight: 18
   },
   checkbox: {
     width: 18,
