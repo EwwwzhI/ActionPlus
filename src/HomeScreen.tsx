@@ -1704,11 +1704,11 @@ export function HomeScreen() {
             <View style={styles.modalHeader}>
               <Text style={styles.sectionTitle}>积分历史</Text>
               <View style={styles.modalActions}>
-                <Pressable onPress={handleExportRecords} style={pressable(styles.profileAction)}>
-                  <Text style={styles.profileActionText}>导出</Text>
+                <Pressable onPress={handleExportRecords} style={pressable(styles.modalAction)}>
+                  <Text style={styles.modalActionText}>导出</Text>
                 </Pressable>
-                <Pressable onPress={() => setIsHistoryOpen(false)} style={pressable(styles.profileAction)}>
-                  <Text style={styles.profileActionText}>关闭</Text>
+                <Pressable onPress={() => setIsHistoryOpen(false)} style={pressable(styles.modalAction)}>
+                  <Text style={styles.modalActionText}>关闭</Text>
                 </Pressable>
               </View>
             </View>
@@ -2730,6 +2730,19 @@ const styles = StyleSheet.create({
   modalActions: {
     flexDirection: "row",
     gap: 6
+  },
+  modalAction: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.background
+  },
+  modalActionText: {
+    fontSize: 12,
+    color: theme.colors.text,
+    fontWeight: "600"
   },
   detailSummary: {
     flexDirection: "row",
