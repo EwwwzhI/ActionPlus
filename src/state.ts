@@ -8,6 +8,7 @@ export type Task = {
   planType: PlanType;
   sourceTemplateId?: string;
   detailNote?: string;
+  deadlineDate?: string;
   maxPoints: number;
   earnedPoints: number | null;
   settledAt?: number | null;
@@ -99,6 +100,7 @@ export type Action =
   | { type: "ADD_TASK"; task: Task }
   | { type: "TOGGLE_TASK"; taskId: string }
   | { type: "SET_TASK_EARNED"; taskId: string; earnedPoints: number; note?: string }
+  | { type: "SET_TASK_DEADLINE"; taskId: string; deadlineDate?: string }
   | { type: "ADD_TEMPLATE"; template: TaskTemplate }
   | { type: "TOGGLE_TEMPLATE_AUTO"; templateId: string; enabled: boolean }
   | { type: "SET_TEMPLATE_AUTO_RULE"; templateId: string; rule: AutoRule }
@@ -245,6 +247,14 @@ export function reducer(state: AppState, action: Action): AppState {
         tasks,
         points: clampPoints(state.points + delta)
       };
+    }
+    case "SET_TASK_DEADLINE": {
+      const tasks = state.tasks.map((task) => {
+        if (task.id !== action.taskId) return task;
+        if (task.planType !== "longterm") return task;
+        return { ...task, deadlineDate: action.deadlineDate?.trim() || undefined };
+      });
+      return { ...state, tasks };
     }
     case "ADD_TEMPLATE": {
       const exists = state.templates.some(

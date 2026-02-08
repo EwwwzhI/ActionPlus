@@ -31,12 +31,20 @@ import { loadState, saveState } from "./storage";
 import { theme } from "./theme";
 
 const GROUP_COLORS = [
-  { id: "blue", label: "蓝色", value: "#0E7490" },
-  { id: "green", label: "绿色", value: "#16A34A" },
-  { id: "orange", label: "橙色", value: "#F97316" },
-  { id: "purple", label: "紫色", value: "#7C3AED" },
-  { id: "pink", label: "粉色", value: "#DB2777" },
-  { id: "gray", label: "灰色", value: "#64748B" }
+  { id: "teal-deep", label: "深青", value: "#0E7490" },
+  { id: "teal-mid", label: "青色", value: "#0F766E" },
+  { id: "teal-light", label: "浅青", value: "#14B8A6" },
+  { id: "blue-deep", label: "深蓝", value: "#1D4ED8" },
+  { id: "blue-mid", label: "蓝色", value: "#2563EB" },
+  { id: "blue-light", label: "浅蓝", value: "#3B82F6" },
+  { id: "green-deep", label: "深绿", value: "#15803D" },
+  { id: "green-mid", label: "绿色", value: "#16A34A" },
+  { id: "green-light", label: "浅绿", value: "#22C55E" },
+  { id: "orange-deep", label: "深橙", value: "#EA580C" },
+  { id: "orange-mid", label: "橙色", value: "#F97316" },
+  { id: "orange-light", label: "浅橙", value: "#FB923C" },
+  { id: "rose", label: "玫红", value: "#E11D48" },
+  { id: "slate", label: "灰色", value: "#64748B" }
 ];
 
 const AUTO_RULE_OPTIONS: Array<{ value: AutoRule; label: string }> = [
@@ -114,6 +122,11 @@ function pad2(value: number): string {
   return String(value).padStart(2, "0");
 }
 
+type DeadlinePickerTarget = { kind: "create" } | { kind: "task"; taskId: string };
+const WHEEL_ITEM_HEIGHT = 36;
+const WHEEL_VISIBLE_ROWS = 5;
+const WHEEL_CONTENT_PADDING = ((WHEEL_VISIBLE_ROWS - 1) / 2) * WHEEL_ITEM_HEIGHT;
+
 export function HomeScreen() {
   const [state, dispatch] = useReducer(reducer, initialState);
   const [activeGroupId, setActiveGroupId] = useState(DEFAULT_GROUP_ID);
@@ -125,10 +138,23 @@ export function HomeScreen() {
   const [taskTitle, setTaskTitle] = useState("");
   const [taskPoints, setTaskPoints] = useState("");
   const [taskDetailNote, setTaskDetailNote] = useState("");
+  const [longtermDeadlineDraft, setLongtermDeadlineDraft] = useState("");
+  const [noticeText, setNoticeText] = useState<string | null>(null);
+  const noticeAnim = React.useRef(new Animated.Value(0)).current;
+  const noticeTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [isDeadlinePickerOpen, setIsDeadlinePickerOpen] = useState(false);
+  const [deadlinePickerTarget, setDeadlinePickerTarget] = useState<DeadlinePickerTarget | null>(null);
+  const [deadlinePickerYear, setDeadlinePickerYear] = useState(new Date().getFullYear());
+  const [deadlinePickerMonth, setDeadlinePickerMonth] = useState(new Date().getMonth() + 1);
+  const [deadlinePickerDay, setDeadlinePickerDay] = useState(new Date().getDate());
+  const yearWheelRef = React.useRef<ScrollView | null>(null);
+  const monthWheelRef = React.useRef<ScrollView | null>(null);
+  const dayWheelRef = React.useRef<ScrollView | null>(null);
   const [isCreateTemplateDropdownOpen, setIsCreateTemplateDropdownOpen] = useState(false);
   const [dailyTargetKey, setDailyTargetKey] = useState(() => formatLocalDate(addDays(new Date(), 1)));
   const [earnedDrafts, setEarnedDrafts] = useState<Record<string, string>>({});
   const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
+  const [expandedSettleRows, setExpandedSettleRows] = useState<Record<string, boolean>>({});
   const [taskListTab, setTaskListTab] = useState<"today" | "tomorrow">("today");
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
   const [activeChart, setActiveChart] = useState<"line" | "calendar">("line");
@@ -167,6 +193,14 @@ export function HomeScreen() {
     });
     return () => {
       isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (noticeTimerRef.current) {
+        clearTimeout(noticeTimerRef.current);
+      }
     };
   }, []);
 
@@ -581,10 +615,137 @@ export function HomeScreen() {
     return rounded;
   }
 
+  function parseOptionalDateKey(value: string): string {
+    const parsed = parseDateKey(value);
+    if (!parsed) return "";
+    return formatLocalDate(parsed);
+  }
+
+  function showShortNotice(message: string) {
+    if (noticeTimerRef.current) {
+      clearTimeout(noticeTimerRef.current);
+    }
+    setNoticeText(message);
+    noticeAnim.setValue(0);
+    Animated.timing(noticeAnim, {
+      toValue: 1,
+      duration: 180,
+      useNativeDriver: true
+    }).start();
+    noticeTimerRef.current = setTimeout(() => {
+      Animated.timing(noticeAnim, {
+        toValue: 0,
+        duration: 220,
+        useNativeDriver: true
+      }).start(() => setNoticeText(null));
+    }, 1200);
+  }
+
+  function dateFromDateKeyOrToday(dateKey?: string): Date {
+    const parsed = typeof dateKey === "string" ? parseDateKey(dateKey) : null;
+    return parsed ?? startOfDay(new Date());
+  }
+
+  const yearOptions = useMemo(() => {
+    const current = new Date().getFullYear();
+    return Array.from({ length: 61 }, (_, idx) => current - 30 + idx);
+  }, []);
+  const monthOptions = useMemo(() => Array.from({ length: 12 }, (_, idx) => idx + 1), []);
+  const dayOptions = useMemo(() => {
+    const daysInMonth = new Date(deadlinePickerYear, deadlinePickerMonth, 0).getDate();
+    return Array.from({ length: daysInMonth }, (_, idx) => idx + 1);
+  }, [deadlinePickerYear, deadlinePickerMonth]);
+
+  useEffect(() => {
+    if (deadlinePickerDay <= dayOptions.length) return;
+    setDeadlinePickerDay(dayOptions.length);
+  }, [deadlinePickerDay, dayOptions.length]);
+
+  useEffect(() => {
+    if (!isDeadlinePickerOpen) return;
+    const yearIndex = Math.max(0, yearOptions.indexOf(deadlinePickerYear));
+    const monthIndex = Math.max(0, monthOptions.indexOf(deadlinePickerMonth));
+    const dayIndex = Math.max(0, dayOptions.indexOf(deadlinePickerDay));
+    const timer = setTimeout(() => {
+      yearWheelRef.current?.scrollTo({ y: yearIndex * WHEEL_ITEM_HEIGHT, animated: false });
+      monthWheelRef.current?.scrollTo({ y: monthIndex * WHEEL_ITEM_HEIGHT, animated: false });
+      dayWheelRef.current?.scrollTo({ y: dayIndex * WHEEL_ITEM_HEIGHT, animated: false });
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [
+    isDeadlinePickerOpen,
+    deadlinePickerYear,
+    deadlinePickerMonth,
+    deadlinePickerDay,
+    yearOptions,
+    monthOptions,
+    dayOptions
+  ]);
+
+  function readWheelIndex(offsetY: number, length: number): number {
+    const raw = Math.round(offsetY / WHEEL_ITEM_HEIGHT);
+    return Math.max(0, Math.min(length - 1, raw));
+  }
+
+  function openCreateDeadlinePicker() {
+    const initialDate = dateFromDateKeyOrToday(longtermDeadlineDraft);
+    setDeadlinePickerTarget({ kind: "create" });
+    setDeadlinePickerYear(initialDate.getFullYear());
+    setDeadlinePickerMonth(initialDate.getMonth() + 1);
+    setDeadlinePickerDay(initialDate.getDate());
+    setIsDeadlinePickerOpen(true);
+  }
+
+  function openTaskDeadlinePicker(task: Task) {
+    const initialDate = dateFromDateKeyOrToday(task.deadlineDate);
+    setDeadlinePickerTarget({ kind: "task", taskId: task.id });
+    setDeadlinePickerYear(initialDate.getFullYear());
+    setDeadlinePickerMonth(initialDate.getMonth() + 1);
+    setDeadlinePickerDay(initialDate.getDate());
+    setIsDeadlinePickerOpen(true);
+  }
+
+  function closeDeadlinePicker() {
+    setIsDeadlinePickerOpen(false);
+    setDeadlinePickerTarget(null);
+  }
+
+  function applyDeadlinePicker() {
+    const dateKey = formatLocalDate(new Date(deadlinePickerYear, deadlinePickerMonth - 1, deadlinePickerDay));
+    if (!deadlinePickerTarget) return;
+    if (deadlinePickerTarget.kind === "create") {
+      setLongtermDeadlineDraft(dateKey);
+      showShortNotice("截止日期已设置");
+    } else {
+      dispatch({
+        type: "SET_TASK_DEADLINE",
+        taskId: deadlinePickerTarget.taskId,
+        deadlineDate: dateKey
+      });
+      showShortNotice("截止日期已保存");
+    }
+    closeDeadlinePicker();
+  }
+
+  function clearCreateDeadline() {
+    setLongtermDeadlineDraft("");
+    showShortNotice("已清空截止日期");
+  }
+
+  function clearTaskDeadline(task: Task) {
+    dispatch({
+      type: "SET_TASK_DEADLINE",
+      taskId: task.id,
+      deadlineDate: undefined
+    });
+    showShortNotice("已清空截止日期");
+  }
+
   function handleAddTask() {
     const detailNote = taskDetailNote.trim() || undefined;
     const title = taskTitle.trim();
     const points = parsePositiveInt(taskPoints);
+    const parsedDeadline = newTaskType === "longterm" ? parseOptionalDateKey(longtermDeadlineDraft) : "";
     if (!title || points === null) {
       Alert.alert("输入有误", "请输入任务名称和大于 0 的最高分");
       return;
@@ -603,12 +764,14 @@ export function HomeScreen() {
       earnedPoints: null,
       completed: false,
       targetDate: newTaskType === "daily" ? dailyTargetKey : undefined,
+      deadlineDate: newTaskType === "longterm" && parsedDeadline ? parsedDeadline : undefined,
       createdAt: Date.now()
     };
     dispatch({ type: "ADD_TASK", task });
     setTaskTitle("");
     setTaskPoints("");
     setTaskDetailNote("");
+    setLongtermDeadlineDraft("");
     setIsCreateTemplateDropdownOpen(false);
     setIsTaskModalOpen(false);
   }
@@ -617,6 +780,7 @@ export function HomeScreen() {
     setTaskTitle(template.title);
     setTaskPoints(String(template.maxPoints));
     setActiveGroupId(template.groupId);
+    setLongtermDeadlineDraft("");
     setIsCreateTemplateDropdownOpen(false);
   }
 
@@ -712,7 +876,7 @@ export function HomeScreen() {
   function handleDeleteGroup() {
     if (!activeGroup) return;
     if (activeGroup.id === DEFAULT_GROUP_ID) {
-      Alert.alert("无法删除", "默认任务组不能删除");
+      showShortNotice("默认任务组不能删除");
       return;
     }
     setConfirmState({
@@ -777,7 +941,7 @@ export function HomeScreen() {
       return;
     }
     if (isTemplateSaved(task)) {
-      Alert.alert("无需重复保存", "该任务已在任务库中，不允许重复保存");
+      showShortNotice("该任务已在任务库中，无需重复保存");
       return;
     }
     const template: TaskTemplate = {
@@ -789,6 +953,7 @@ export function HomeScreen() {
       createdAt: Date.now()
     };
     dispatch({ type: "ADD_TEMPLATE", template });
+    showShortNotice("已成功保存到任务库");
   }
 
   function escapeCsvValue(value: string | number): string {
@@ -1046,6 +1211,7 @@ export function HomeScreen() {
               style={pressable(styles.iconButton)}
               onPress={() => {
                 setTaskDetailNote("");
+                setLongtermDeadlineDraft("");
                 setIsCreateTemplateDropdownOpen(false);
                 setIsTaskModalOpen(true);
               }}
@@ -1153,49 +1319,65 @@ export function HomeScreen() {
               const draft = earnedDrafts[task.id];
               const value = draft ?? (task.earnedPoints !== null ? String(task.earnedPoints) : "");
               const noteValue = noteDrafts[task.id] ?? task.note ?? "";
+              const isExpanded = Boolean(expandedSettleRows[task.id]);
               const statusText =
                 task.earnedPoints === null ? "未结算" : `已得 ${task.earnedPoints} 分`;
               const dateHint =
                 task.targetDate && task.targetDate !== todayKey ? `计划日 ${task.targetDate}` : "计划日 今日";
               return (
                 <View key={task.id} style={styles.settleRow}>
-                  <View style={styles.settleMain}>
-                    <Text style={styles.taskTitle}>{task.title}</Text>
-                    <Text
-                      style={styles.taskMeta}
-                    >{`最高 ${task.maxPoints} 分 · ${dateHint} · 任务组 ${getGroupName(task.groupId)}`}</Text>
-                    {task.detailNote ? (
-                      <View style={styles.noteStrip}>
-                        <Text style={styles.noteStripText}>{task.detailNote}</Text>
-                      </View>
-                    ) : null}
-                    <Text style={styles.statusText}>{statusText}</Text>
-                  </View>
-                  <View style={styles.settleControls}>
-                    <TextInput
-                      value={value}
-                      onChangeText={(text) =>
-                        setEarnedDrafts((prev) => ({ ...prev, [task.id]: text }))
-                      }
-                      placeholder="实际分"
-                      placeholderTextColor={theme.colors.muted}
-                      keyboardType="number-pad"
-                      style={[styles.input, styles.inputTiny]}
-                    />
+                  <View style={styles.settleHeader}>
+                    <View style={styles.taskMainColumn}>
+                      <Text style={styles.taskTitle}>{task.title}</Text>
+                      <Text style={styles.taskMeta}>{`Reward ${task.maxPoints} 分 · 任务组 ${getGroupName(task.groupId)}`}</Text>
+                    </View>
                     <Pressable
-                      onPress={() => handleSetEarned(task)}
-                      style={pressable([styles.button, styles.buttonTiny])}
+                      onPress={() =>
+                        setExpandedSettleRows((prev) => ({ ...prev, [task.id]: !Boolean(prev[task.id]) }))
+                      }
+                      style={pressable(styles.linkButton)}
                     >
-                      <Text style={styles.buttonText}>确认</Text>
+                      <Text style={styles.linkText}>{isExpanded ? "收起" : "展开"}</Text>
                     </Pressable>
                   </View>
-                  <TextInput
-                    value={noteValue}
-                    onChangeText={(text) => setNoteDrafts((prev) => ({ ...prev, [task.id]: text }))}
-                    placeholder="备注"
-                    placeholderTextColor={theme.colors.muted}
-                    style={[styles.input, styles.inputNote]}
-                  />
+                  {isExpanded ? (
+                    <>
+                      <View style={styles.settleMain}>
+                        <Text style={styles.taskMeta}>{dateHint}</Text>
+                        {task.detailNote ? (
+                          <View style={styles.noteStrip}>
+                            <Text style={styles.noteStripText}>{task.detailNote}</Text>
+                          </View>
+                        ) : null}
+                        <Text style={styles.statusText}>{statusText}</Text>
+                      </View>
+                      <View style={styles.settleControls}>
+                        <TextInput
+                          value={value}
+                          onChangeText={(text) =>
+                            setEarnedDrafts((prev) => ({ ...prev, [task.id]: text }))
+                          }
+                          placeholder="实际分"
+                          placeholderTextColor={theme.colors.muted}
+                          keyboardType="number-pad"
+                          style={[styles.input, styles.inputTiny]}
+                        />
+                        <Pressable
+                          onPress={() => handleSetEarned(task)}
+                          style={pressable([styles.button, styles.buttonTiny])}
+                        >
+                          <Text style={styles.buttonText}>确认</Text>
+                        </Pressable>
+                      </View>
+                      <TextInput
+                        value={noteValue}
+                        onChangeText={(text) => setNoteDrafts((prev) => ({ ...prev, [task.id]: text }))}
+                        placeholder="备注"
+                        placeholderTextColor={theme.colors.muted}
+                        style={[styles.input, styles.inputNote]}
+                      />
+                    </>
+                  ) : null}
                 </View>
               );
             })
@@ -1216,57 +1398,89 @@ export function HomeScreen() {
               const draft = earnedDrafts[task.id];
               const value = draft ?? (task.earnedPoints !== null ? String(task.earnedPoints) : "");
               const noteValue = noteDrafts[task.id] ?? task.note ?? "";
+              const isExpanded = Boolean(expandedSettleRows[task.id]);
               const statusText = task.earnedPoints === null ? "未结算" : `已得 ${task.earnedPoints} 分`;
               return (
                 <View key={task.id} style={styles.settleRow}>
-                  <View style={styles.settleMain}>
-                    <Text style={styles.taskTitle}>{task.title}</Text>
-                    <Text style={styles.taskMeta}>{`最高 ${task.maxPoints} 分 · 任务组 ${getGroupName(task.groupId)}`}</Text>
-                    {task.detailNote ? (
-                      <View style={styles.noteStrip}>
-                        <Text style={styles.noteStripText}>{task.detailNote}</Text>
-                      </View>
-                    ) : null}
-                    <Text style={styles.statusText}>{statusText}</Text>
-                  </View>
-                  <View style={styles.settleControls}>
-                    <TextInput
-                      value={value}
-                      onChangeText={(text) => setEarnedDrafts((prev) => ({ ...prev, [task.id]: text }))}
-                      placeholder="实际分"
-                      placeholderTextColor={theme.colors.muted}
-                      keyboardType="number-pad"
-                      style={[styles.input, styles.inputTiny]}
-                    />
-                    <Pressable
-                      onPress={() => handleSetEarned(task)}
-                      style={pressable([styles.button, styles.buttonTiny])}
-                    >
-                      <Text style={styles.buttonText}>确认</Text>
-                    </Pressable>
-                    <Pressable onPress={() => handleSaveTemplate(task)} style={pressable(styles.linkButton)}>
-                      <Text style={styles.linkText}>保存</Text>
-                    </Pressable>
+                  <View style={styles.settleHeader}>
+                    <View style={styles.taskMainColumn}>
+                      <Text style={styles.taskTitle}>{task.title}</Text>
+                      <Text style={styles.taskMeta}>{`Reward ${task.maxPoints} 分 · 任务组 ${getGroupName(task.groupId)}`}</Text>
+                    </View>
                     <Pressable
                       onPress={() =>
-                        setConfirmState({
-                          title: "删除任务",
-                          message: "确定删除该任务",
-                          action: { type: "deleteTask", taskId: task.id }
-                        })
+                        setExpandedSettleRows((prev) => ({ ...prev, [task.id]: !Boolean(prev[task.id]) }))
                       }
                       style={pressable(styles.linkButton)}
                     >
-                      <Text style={styles.linkTextDanger}>删除</Text>
+                      <Text style={styles.linkText}>{isExpanded ? "收起" : "展开"}</Text>
                     </Pressable>
                   </View>
-                  <TextInput
-                    value={noteValue}
-                    onChangeText={(text) => setNoteDrafts((prev) => ({ ...prev, [task.id]: text }))}
-                    placeholder="备注"
-                    placeholderTextColor={theme.colors.muted}
-                    style={[styles.input, styles.inputNote]}
-                  />
+                  {isExpanded ? (
+                    <>
+                      <View style={styles.settleMain}>
+                        <Text style={styles.taskMeta}>{`截止日期 ${task.deadlineDate ?? "未设置"}`}</Text>
+                        {task.detailNote ? (
+                          <View style={styles.noteStrip}>
+                            <Text style={styles.noteStripText}>{task.detailNote}</Text>
+                          </View>
+                        ) : null}
+                        <Text style={styles.statusText}>{statusText}</Text>
+                      </View>
+                      <View style={styles.deadlineRow}>
+                        <Pressable
+                          onPress={() => openTaskDeadlinePicker(task)}
+                          style={pressable([styles.typeChip, styles.deadlineChip])}
+                        >
+                          <Text style={styles.typeChipText}>选择截止日期</Text>
+                        </Pressable>
+                        <Pressable
+                          onPress={() => clearTaskDeadline(task)}
+                          style={pressable([styles.typeChip, styles.deadlineChip])}
+                        >
+                          <Text style={styles.typeChipText}>清空</Text>
+                        </Pressable>
+                      </View>
+                      <View style={styles.settleControls}>
+                        <TextInput
+                          value={value}
+                          onChangeText={(text) => setEarnedDrafts((prev) => ({ ...prev, [task.id]: text }))}
+                          placeholder="实际分"
+                          placeholderTextColor={theme.colors.muted}
+                          keyboardType="number-pad"
+                          style={[styles.input, styles.inputTiny]}
+                        />
+                        <Pressable
+                          onPress={() => handleSetEarned(task)}
+                          style={pressable([styles.button, styles.buttonTiny])}
+                        >
+                          <Text style={styles.buttonText}>确认</Text>
+                        </Pressable>
+                        <Pressable onPress={() => handleSaveTemplate(task)} style={pressable(styles.linkButton)}>
+                          <Text style={styles.linkText}>保存</Text>
+                        </Pressable>
+                        <Pressable
+                          onPress={() =>
+                            setConfirmState({
+                              title: "删除任务",
+                              message: "确定删除该任务",
+                              action: { type: "deleteTask", taskId: task.id }
+                            })
+                          }
+                          style={pressable(styles.linkButton)}
+                        >
+                          <Text style={styles.linkTextDanger}>删除</Text>
+                        </Pressable>
+                      </View>
+                      <TextInput
+                        value={noteValue}
+                        onChangeText={(text) => setNoteDrafts((prev) => ({ ...prev, [task.id]: text }))}
+                        placeholder="备注"
+                        placeholderTextColor={theme.colors.muted}
+                        style={[styles.input, styles.inputNote]}
+                      />
+                    </>
+                  ) : null}
                 </View>
               );
             })
@@ -1419,6 +1633,27 @@ export function HomeScreen() {
       <Pressable style={pressable(styles.fab)} onPress={() => setIsTemplatePickerOpen(true)}>
         <Text style={styles.fabText}>🏬</Text>
       </Pressable>
+
+      {noticeText ? (
+        <Animated.View
+          style={[
+            styles.noticeToast,
+            {
+              opacity: noticeAnim,
+              transform: [
+                {
+                  translateY: noticeAnim.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [12, 0]
+                  })
+                }
+              ]
+            }
+          ]}
+        >
+          <Text style={styles.noticeToastText}>{noticeText}</Text>
+        </Animated.View>
+      ) : null}
 
       <Modal visible={isTemplatePickerOpen} transparent animationType="fade">
         <View style={styles.modalBackdrop}>
@@ -1788,7 +2023,15 @@ export function HomeScreen() {
 
       <Modal visible={isTaskModalOpen} transparent animationType="fade">
         <View style={styles.modalBackdrop}>
-          <Pressable style={styles.modalBackdropPress} onPress={() => setIsTaskModalOpen(false)} />
+          <Pressable
+            style={styles.modalBackdropPress}
+            onPress={() => {
+              setTaskDetailNote("");
+              setLongtermDeadlineDraft("");
+              setIsCreateTemplateDropdownOpen(false);
+              setIsTaskModalOpen(false);
+            }}
+          />
           <View style={styles.modalSheet}>
             <View style={styles.modalHeader}>
               <View style={styles.titleRow}>
@@ -1810,6 +2053,7 @@ export function HomeScreen() {
               <Pressable
                 onPress={() => {
                   setTaskDetailNote("");
+                  setLongtermDeadlineDraft("");
                   setIsCreateTemplateDropdownOpen(false);
                   setIsTaskModalOpen(false);
                 }}
@@ -1828,6 +2072,7 @@ export function HomeScreen() {
                       setNewTaskType(type);
                       if (type === "daily") {
                         setDailyTargetKey(tomorrowKey);
+                        setLongtermDeadlineDraft("");
                       }
                     }}
                     style={pressable([styles.typeChip, isActive && styles.typeChipActive])}
@@ -1908,6 +2153,27 @@ export function HomeScreen() {
                 </View>
               </>
             ) : null}
+            {newTaskType === "longterm" ? (
+              <View style={styles.deadlineCreateRow}>
+                <View style={styles.pillInline}>
+                  <Text style={styles.pillText}>{`截止日期 ${longtermDeadlineDraft || "未设置"}`}</Text>
+                </View>
+                <View style={styles.deadlineRow}>
+                  <Pressable
+                    onPress={openCreateDeadlinePicker}
+                    style={pressable([styles.typeChip, styles.deadlineChip])}
+                  >
+                    <Text style={styles.typeChipText}>选择日期</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={clearCreateDeadline}
+                    style={pressable([styles.typeChip, styles.deadlineChip])}
+                  >
+                    <Text style={styles.typeChipText}>清空</Text>
+                  </Pressable>
+                </View>
+              </View>
+            ) : null}
             <View style={styles.row}>
               <TextInput
                 value={taskPoints}
@@ -1923,6 +2189,104 @@ export function HomeScreen() {
                 style={pressable([styles.button, !canAddTask && styles.buttonDisabled])}
               >
                 <Text style={styles.buttonText}>创建</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={isDeadlinePickerOpen} transparent animationType="fade">
+        <View style={styles.confirmBackdrop}>
+          <View style={styles.confirmCard}>
+            <Text style={styles.sectionTitle}>选择截止日期</Text>
+            <View style={styles.deadlineWheelWrap}>
+              <View style={styles.deadlineWheelMask} />
+              <View style={styles.deadlineWheelRow}>
+                <ScrollView
+                  ref={yearWheelRef}
+                  style={styles.deadlineWheelColumn}
+                  contentContainerStyle={styles.deadlineWheelContent}
+                  showsVerticalScrollIndicator={false}
+                  snapToInterval={WHEEL_ITEM_HEIGHT}
+                  decelerationRate="fast"
+                  onMomentumScrollEnd={(event) => {
+                    const index = readWheelIndex(event.nativeEvent.contentOffset.y, yearOptions.length);
+                    setDeadlinePickerYear(yearOptions[index]);
+                  }}
+                  onScrollEndDrag={(event) => {
+                    const index = readWheelIndex(event.nativeEvent.contentOffset.y, yearOptions.length);
+                    setDeadlinePickerYear(yearOptions[index]);
+                  }}
+                >
+                  {yearOptions.map((year) => (
+                    <View key={`year_${year}`} style={styles.deadlineWheelItem}>
+                      <Text style={[styles.deadlineWheelText, year === deadlinePickerYear && styles.deadlineWheelTextActive]}>
+                        {year}年
+                      </Text>
+                    </View>
+                  ))}
+                </ScrollView>
+                <ScrollView
+                  ref={monthWheelRef}
+                  style={styles.deadlineWheelColumn}
+                  contentContainerStyle={styles.deadlineWheelContent}
+                  showsVerticalScrollIndicator={false}
+                  snapToInterval={WHEEL_ITEM_HEIGHT}
+                  decelerationRate="fast"
+                  onMomentumScrollEnd={(event) => {
+                    const index = readWheelIndex(event.nativeEvent.contentOffset.y, monthOptions.length);
+                    setDeadlinePickerMonth(monthOptions[index]);
+                  }}
+                  onScrollEndDrag={(event) => {
+                    const index = readWheelIndex(event.nativeEvent.contentOffset.y, monthOptions.length);
+                    setDeadlinePickerMonth(monthOptions[index]);
+                  }}
+                >
+                  {monthOptions.map((month) => (
+                    <View key={`month_${month}`} style={styles.deadlineWheelItem}>
+                      <Text
+                        style={[
+                          styles.deadlineWheelText,
+                          month === deadlinePickerMonth && styles.deadlineWheelTextActive
+                        ]}
+                      >
+                        {month}月
+                      </Text>
+                    </View>
+                  ))}
+                </ScrollView>
+                <ScrollView
+                  ref={dayWheelRef}
+                  style={styles.deadlineWheelColumn}
+                  contentContainerStyle={styles.deadlineWheelContent}
+                  showsVerticalScrollIndicator={false}
+                  snapToInterval={WHEEL_ITEM_HEIGHT}
+                  decelerationRate="fast"
+                  onMomentumScrollEnd={(event) => {
+                    const index = readWheelIndex(event.nativeEvent.contentOffset.y, dayOptions.length);
+                    setDeadlinePickerDay(dayOptions[index]);
+                  }}
+                  onScrollEndDrag={(event) => {
+                    const index = readWheelIndex(event.nativeEvent.contentOffset.y, dayOptions.length);
+                    setDeadlinePickerDay(dayOptions[index]);
+                  }}
+                >
+                  {dayOptions.map((day) => (
+                    <View key={`day_${day}`} style={styles.deadlineWheelItem}>
+                      <Text style={[styles.deadlineWheelText, day === deadlinePickerDay && styles.deadlineWheelTextActive]}>
+                        {day}日
+                      </Text>
+                    </View>
+                  ))}
+                </ScrollView>
+              </View>
+            </View>
+            <View style={styles.confirmActions}>
+              <Pressable onPress={closeDeadlinePicker} style={pressable(styles.confirmGhost)}>
+                <Text style={styles.confirmGhostText}>取消</Text>
+              </Pressable>
+              <Pressable onPress={applyDeadlinePicker} style={pressable(styles.button)}>
+                <Text style={styles.buttonText}>确定</Text>
               </Pressable>
             </View>
           </View>
@@ -2117,6 +2481,7 @@ const styles = StyleSheet.create({
   },
   colorRow: {
     flexDirection: "row",
+    flexWrap: "wrap",
     gap: 10,
     paddingVertical: theme.spacing.sm,
     marginBottom: theme.spacing.sm
@@ -2191,6 +2556,19 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: theme.spacing.sm
+  },
+  deadlineRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing.sm,
+    marginBottom: theme.spacing.sm
+  },
+  deadlineCreateRow: {
+    marginBottom: theme.spacing.sm
+  },
+  deadlineChip: {
+    flex: 0,
+    paddingHorizontal: theme.spacing.md
   },
   reminderTimeRow: {
     flexDirection: "row",
@@ -2595,6 +2973,29 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     marginTop: -2
   },
+  noticeToast: {
+    position: "absolute",
+    left: theme.spacing.lg,
+    right: theme.spacing.lg,
+    bottom: theme.spacing.lg + 68,
+    backgroundColor: theme.colors.surface,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: theme.radius.md,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
+    alignItems: "center",
+    shadowColor: "#0B1F2A",
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3
+  },
+  noticeToastText: {
+    color: theme.colors.text,
+    fontSize: theme.font.sm,
+    fontWeight: "600"
+  },
   emptyState: {
     alignItems: "center",
     paddingVertical: theme.spacing.lg,
@@ -2840,17 +3241,72 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: theme.colors.border
   },
+  settleHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: theme.spacing.sm
+  },
   settleMain: {
     marginBottom: theme.spacing.sm
   },
   settleControls: {
     flexDirection: "row",
     alignItems: "center",
+    flexWrap: "wrap",
     gap: theme.spacing.sm
   },
   statusText: {
     fontSize: theme.font.sm,
     color: theme.colors.accent,
     marginTop: 4
+  },
+  deadlineWheelWrap: {
+    position: "relative",
+    marginTop: theme.spacing.sm,
+    marginBottom: theme.spacing.sm
+  },
+  deadlineWheelRow: {
+    flexDirection: "row",
+    gap: theme.spacing.sm
+  },
+  deadlineWheelColumn: {
+    flex: 1,
+    height: WHEEL_ITEM_HEIGHT * WHEEL_VISIBLE_ROWS,
+    backgroundColor: theme.colors.background,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: theme.radius.md
+  },
+  deadlineWheelContent: {
+    paddingVertical: WHEEL_CONTENT_PADDING
+  },
+  deadlineWheelItem: {
+    height: WHEEL_ITEM_HEIGHT,
+    alignItems: "center",
+    justifyContent: "center"
+  },
+  deadlineWheelText: {
+    fontSize: theme.font.md,
+    color: theme.colors.muted
+  },
+  deadlineWheelTextActive: {
+    color: theme.colors.text,
+    fontWeight: "700"
+  },
+  deadlineWheelMask: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    top: (WHEEL_VISIBLE_ROWS / 2) * WHEEL_ITEM_HEIGHT - WHEEL_ITEM_HEIGHT / 2,
+    height: WHEEL_ITEM_HEIGHT,
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: theme.colors.accent,
+    backgroundColor: theme.colors.accentSoft,
+    opacity: 0.55,
+    borderRadius: theme.radius.sm,
+    zIndex: 1,
+    pointerEvents: "none"
   }
 });

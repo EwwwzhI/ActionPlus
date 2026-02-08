@@ -50,6 +50,10 @@ function normalizeTask(raw: unknown, todayKey: string, groupIds: Set<string>): T
   const completed = Boolean(data.completed);
   const targetDate =
     planType === "daily" && typeof data.targetDate === "string" ? data.targetDate : planType === "daily" ? todayKey : undefined;
+  const deadlineDate =
+    planType === "longterm" && typeof (raw as { deadlineDate?: unknown }).deadlineDate === "string"
+      ? (raw as { deadlineDate?: string }).deadlineDate?.trim() || undefined
+      : undefined;
   const groupId =
     typeof data.groupId === "string" && groupIds.has(data.groupId) ? data.groupId : DEFAULT_GROUP_ID;
   const sourceTemplateId =
@@ -69,6 +73,7 @@ function normalizeTask(raw: unknown, todayKey: string, groupIds: Set<string>): T
     detailNote: detailNote || undefined,
     completed,
     targetDate,
+    deadlineDate,
     createdAt
   };
 }
