@@ -30,11 +30,16 @@ export type ArchiveSettings = {
   periodStart: string | null;
 };
 
+export type NotificationDateMode = "today" | "tomorrow";
+export type NotificationRepeatRule = "once" | "daily" | "weekday";
+
 export type NotificationSettings = {
   enabled: boolean;
   hour: number;
   minute: number;
   taskIds: string[];
+  dateMode: NotificationDateMode;
+  repeatRule: NotificationRepeatRule;
 };
 
 export type ScoreArchive = {
@@ -85,7 +90,9 @@ export const initialState: AppState = {
     enabled: true,
     hour: 8,
     minute: 0,
-    taskIds: []
+    taskIds: [],
+    dateMode: "tomorrow",
+    repeatRule: "daily"
   }
 };
 
@@ -95,7 +102,15 @@ export type Action =
   | { type: "RENAME_GROUP"; groupId: string; name: string; color?: string }
   | { type: "DELETE_GROUP"; groupId: string }
   | { type: "SET_ARCHIVE_CYCLE"; cycleDays: number; periodStart: string }
-  | { type: "SET_NOTIFICATION_SETTINGS"; enabled: boolean; hour: number; minute: number; taskIds: string[] }
+  | {
+      type: "SET_NOTIFICATION_SETTINGS";
+      enabled: boolean;
+      hour: number;
+      minute: number;
+      taskIds: string[];
+      dateMode: NotificationDateMode;
+      repeatRule: NotificationRepeatRule;
+    }
   | { type: "AUTO_ARCHIVE"; cycleDays: number; nextStart: string; endDate: string }
   | { type: "ADD_TASK"; task: Task }
   | { type: "TOGGLE_TASK"; taskId: string }
@@ -176,13 +191,18 @@ export function reducer(state: AppState, action: Action): AppState {
       const hour = Math.min(23, Math.max(0, Math.round(action.hour)));
       const minute = Math.min(59, Math.max(0, Math.round(action.minute)));
       const taskIds = Array.from(new Set(action.taskIds.filter((id) => typeof id === "string" && id)));
+      const dateMode = action.dateMode === "today" ? "today" : "tomorrow";
+      const repeatRule =
+        action.repeatRule === "once" || action.repeatRule === "weekday" ? action.repeatRule : "daily";
       return {
         ...state,
         notificationSettings: {
           enabled,
           hour,
           minute,
-          taskIds
+          taskIds,
+          dateMode,
+          repeatRule
         }
       };
     }

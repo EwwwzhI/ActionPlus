@@ -19,6 +19,8 @@ import * as Notifications from "expo-notifications";
 import {
   DEFAULT_GROUP_ID,
   AutoRule,
+  NotificationDateMode,
+  NotificationRepeatRule,
   PlanType,
   Task,
   TaskGroup,
@@ -58,6 +60,16 @@ const TASK_TYPE_LABELS: Record<PlanType, string> = {
   daily: "每日任务",
   longterm: "长期任务"
 };
+const REMINDER_REPEAT_OPTIONS: Array<{ value: NotificationRepeatRule; label: string }> = [
+  { value: "once", label: "单次" },
+  { value: "daily", label: "每天" },
+  { value: "weekday", label: "工作日" }
+];
+const REMINDER_DATE_OPTIONS: Array<{ value: NotificationDateMode; label: string }> = [
+  { value: "today", label: "今天" },
+  { value: "tomorrow", label: "明天" }
+];
+const REMINDER_SCHEDULE_DAYS = 30;
 
 const GRID_SPACING = 24;
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
@@ -122,6 +134,47 @@ function pad2(value: number): string {
   return String(value).padStart(2, "0");
 }
 
+function buildUpcomingReminderDates(
+  hour: number,
+  minute: number,
+  days: number,
+  repeatRule: NotificationRepeatRule
+): Date[] {
+  const now = new Date();
+  const first = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, minute, 0, 0);
+  if (first.getTime() <= now.getTime()) {
+    first.setDate(first.getDate() + 1);
+  }
+  const maxDays = Math.max(1, days);
+  const dates: Date[] = [];
+  for (let offset = 0; offset < maxDays; offset += 1) {
+    const date = new Date(first);
+    date.setDate(first.getDate() + offset);
+    if (repeatRule === "weekday") {
+      const weekday = date.getDay();
+      if (weekday === 0 || weekday === 6) continue;
+    }
+    dates.push(date);
+  }
+  return dates;
+}
+
+function buildOnceReminderDate(dateMode: NotificationDateMode, hour: number, minute: number): Date {
+  const now = new Date();
+  const dayOffset = dateMode === "today" ? 0 : 1;
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset, hour, minute, 0, 0);
+}
+
+function repeatRuleLabel(rule: NotificationRepeatRule): string {
+  if (rule === "once") return "单次";
+  if (rule === "weekday") return "工作日";
+  return "每天";
+}
+
+function dateModeLabel(mode: NotificationDateMode): string {
+  return mode === "today" ? "今天" : "明天";
+}
+
 type DeadlinePickerTarget = { kind: "create" } | { kind: "task"; taskId: string };
 const WHEEL_ITEM_HEIGHT = 36;
 const WHEEL_VISIBLE_ROWS = 5;
@@ -167,12 +220,15 @@ export function HomeScreen() {
   const [reminderHourDraft, setReminderHourDraft] = useState("08");
   const [reminderMinuteDraft, setReminderMinuteDraft] = useState("00");
   const [reminderTaskIdsDraft, setReminderTaskIdsDraft] = useState<string[]>([]);
+  const [reminderRepeatDraft, setReminderRepeatDraft] = useState<NotificationRepeatRule>("daily");
+  const [reminderDateModeDraft, setReminderDateModeDraft] = useState<NotificationDateMode>("tomorrow");
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [isDayDetailOpen, setIsDayDetailOpen] = useState(false);
   const [selectedDateKey, setSelectedDateKey] = useState<string | null>(null);
   const [isReady, setIsReady] = useState(false);
   const rewardAnim = React.useRef(new Animated.Value(0)).current;
   const [rewardBurst, setRewardBurst] = useState<number | null>(null);
+  const reminderSyncRunRef = React.useRef(0);
   const [confirmState, setConfirmState] = useState<{
     title: string;
     message: string;
@@ -183,6 +239,164 @@ export function HomeScreen() {
   } | null>(null);
   const todayKey = formatLocalDate(new Date());
   const tomorrowKey = formatLocalDate(addDays(new Date(), 1));
+
+  async function ensureNotificationPermissionAndChannel(showFailureAlert = false): Promise<boolean> {
+    try {
+      const current = await Notifications.getPermissionsAsync();
+      let granted = current.granted;
+      if (!granted) {
+        const requested = await Notifications.requestPermissionsAsync();
+        granted = requested.granted;
+      }
+      if (!granted) {
+        if (showFailureAlert) {
+          Alert.alert("通知未开启", "请在系统设置中允许 Action+ 发送通知");
+        }
+        return false;
+      }
+      if (Platform.OS === "android") {
+        await Notifications.setNotificationChannelAsync("task-list", {
+          name: "任务清单",
+          importance: Notifications.AndroidImportance.HIGH
+        });
+      }
+      return true;
+    } catch (error) {
+      if (showFailureAlert) {
+        Alert.alert("通知异常", "通知服务初始化失败，请稍后重试");
+      }
+      return false;
+    }
+  }
+
+  async function syncTaskReminderSchedule(
+    settings: {
+      enabled: boolean;
+      hour: number;
+      minute: number;
+      taskIds: string[];
+      dateMode: NotificationDateMode;
+      repeatRule: NotificationRepeatRule;
+    },
+    showResultNotice = false
+  ): Promise<void> {
+    const runId = ++reminderSyncRunRef.current;
+    const ready = await ensureNotificationPermissionAndChannel(showResultNotice);
+    if (!ready) return;
+    try {
+      if (runId !== reminderSyncRunRef.current) return;
+      const existing = await Notifications.getAllScheduledNotificationsAsync();
+      await Promise.all(
+        existing
+          .filter((item) => item.content?.data?.type === "task_reminder")
+          .map((item) => Notifications.cancelScheduledNotificationAsync(item.identifier))
+      );
+      if (runId !== reminderSyncRunRef.current) return;
+
+      if (!settings.enabled) {
+        if (showResultNotice) showShortNotice("提醒已关闭");
+        return;
+      }
+
+      const idSet = new Set(settings.taskIds);
+      const tasks = dailyTasks.filter((task) => idSet.has(task.id));
+      if (tasks.length === 0) {
+        if (showResultNotice) {
+          Alert.alert("未设置每日提醒任务", "请至少勾选 1 个每日任务后再保存提醒");
+        }
+        return;
+      }
+
+      const message = buildReminderMessage(tasks);
+      if (settings.repeatRule === "once") {
+        const targetDate = buildOnceReminderDate(settings.dateMode, settings.hour, settings.minute);
+        if (targetDate.getTime() <= Date.now()) {
+          if (showResultNotice) {
+            Alert.alert("时间已过", "单次提醒请设置为未来时间");
+          }
+          return;
+        }
+        await Notifications.scheduleNotificationAsync({
+          content: {
+            title: message.title,
+            body: message.body,
+            data: {
+              type: "task_reminder",
+              taskIds: settings.taskIds,
+              repeatRule: settings.repeatRule,
+              dateMode: settings.dateMode
+            }
+          },
+          trigger: {
+            channelId: Platform.OS === "android" ? "task-list" : undefined,
+            date: targetDate
+          }
+        });
+      } else {
+        const upcomingDates = buildUpcomingReminderDates(
+          settings.hour,
+          settings.minute,
+          REMINDER_SCHEDULE_DAYS,
+          settings.repeatRule
+        );
+        await Promise.all(
+          upcomingDates.map((date, index) =>
+            Notifications.scheduleNotificationAsync({
+              content: {
+                title: message.title,
+                body: message.body,
+                data: {
+                  type: "task_reminder",
+                  taskIds: settings.taskIds,
+                  dayOffset: index,
+                  repeatRule: settings.repeatRule
+                }
+              },
+              trigger: {
+                channelId: Platform.OS === "android" ? "task-list" : undefined,
+                date
+              }
+            })
+          )
+        );
+      }
+      if (runId !== reminderSyncRunRef.current) return;
+
+      if (showResultNotice) {
+        const modeText =
+          settings.repeatRule === "once"
+            ? `${dateModeLabel(settings.dateMode)} ${pad2(settings.hour)}:${pad2(settings.minute)}`
+            : `${repeatRuleLabel(settings.repeatRule)} ${pad2(settings.hour)}:${pad2(settings.minute)}`;
+        showShortNotice(`提醒已设置 ${modeText}`);
+      }
+    } catch (error) {
+      if (showResultNotice) {
+        Alert.alert("提醒设置失败", "未能成功创建提醒，请稍后重试");
+      }
+    }
+  }
+
+  async function handleTestReminderNotification() {
+    const ready = await ensureNotificationPermissionAndChannel(true);
+    if (!ready) return;
+    try {
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: "任务提醒测试",
+          body: "如果你看到了这条通知，说明提醒功能工作正常",
+          data: { type: "task_reminder_test" }
+        },
+        trigger: {
+          channelId: Platform.OS === "android" ? "task-list" : undefined,
+          seconds: 5,
+          repeats: false
+        }
+      });
+      showShortNotice("测试通知将在 5 秒后触发");
+    } catch (error) {
+      Alert.alert("测试失败", "无法创建测试通知，请稍后重试");
+    }
+  }
 
   useEffect(() => {
     let isMounted = true;
@@ -218,16 +432,7 @@ export function HomeScreen() {
   useEffect(() => {
     if (!isReady) return;
     const setupNotifications = async () => {
-      const settings = await Notifications.getPermissionsAsync();
-      if (!settings.granted) {
-        await Notifications.requestPermissionsAsync();
-      }
-      if (Platform.OS === "android") {
-        await Notifications.setNotificationChannelAsync("task-list", {
-          name: "任务清单",
-          importance: Notifications.AndroidImportance.DEFAULT
-        });
-      }
+      await ensureNotificationPermissionAndChannel(false);
     };
     setupNotifications();
   }, [isReady]);
@@ -307,10 +512,21 @@ export function HomeScreen() {
     enabled: true,
     hour: 8,
     minute: 0,
-    taskIds: []
+    taskIds: [],
+    dateMode: "tomorrow" as NotificationDateMode,
+    repeatRule: "daily" as NotificationRepeatRule
   };
+  const reminderSummary =
+    notificationSettings.repeatRule === "once"
+      ? `单次 ${dateModeLabel(notificationSettings.dateMode)} ${pad2(notificationSettings.hour)}:${pad2(
+          notificationSettings.minute
+        )}`
+      : `${repeatRuleLabel(notificationSettings.repeatRule)} ${pad2(notificationSettings.hour)}:${pad2(
+          notificationSettings.minute
+        )}`;
+  const dailyTaskIdSet = useMemo(() => new Set(dailyTasks.map((task) => task.id)), [dailyTasks]);
   const reminderTaskOptions = useMemo(() => {
-    return [...allTasks]
+    return [...dailyTasks]
       .sort((a, b) => b.createdAt - a.createdAt)
       .map((task) => ({
         id: task.id,
@@ -319,12 +535,7 @@ export function HomeScreen() {
         groupId: task.groupId,
         maxPoints: task.maxPoints
       }));
-  }, [allTasks]);
-  const selectedReminderTasks = useMemo(() => {
-    if (!notificationSettings.taskIds.length) return [];
-    const idSet = new Set(notificationSettings.taskIds);
-    return allTasks.filter((task) => idSet.has(task.id));
-  }, [allTasks, notificationSettings.taskIds]);
+  }, [dailyTasks]);
   const retentionDays = 120;
   const cutoffDateKey = useMemo(
     () => formatLocalDate(addDays(new Date(), -(retentionDays - 1))),
@@ -386,39 +597,26 @@ export function HomeScreen() {
 
   useEffect(() => {
     if (!isReady) return;
-    const schedule = async () => {
-      const { status } = await Notifications.getPermissionsAsync();
-      if (status !== "granted") return;
-      const existing = await Notifications.getAllScheduledNotificationsAsync();
-      await Promise.all(
-        existing
-          .filter((item) => item.content?.data?.type === "task_reminder")
-          .map((item) => Notifications.cancelScheduledNotificationAsync(item.identifier))
-      );
-      if (!notificationSettings.enabled) return;
-      if (selectedReminderTasks.length === 0) return;
-      const message = buildReminderMessage(selectedReminderTasks);
-      await Notifications.scheduleNotificationAsync({
-        content: {
-          title: message.title,
-          body: message.body,
-          data: { type: "task_reminder", taskIds: notificationSettings.taskIds }
-        },
-        trigger: {
-          hour: notificationSettings.hour,
-          minute: notificationSettings.minute,
-          repeats: true
-        }
-      });
-    };
-    schedule();
+    syncTaskReminderSchedule(
+      {
+        enabled: notificationSettings.enabled,
+        hour: notificationSettings.hour,
+        minute: notificationSettings.minute,
+        taskIds: notificationSettings.taskIds,
+        dateMode: notificationSettings.dateMode,
+        repeatRule: notificationSettings.repeatRule
+      },
+      false
+    );
   }, [
     isReady,
-    selectedReminderTasks,
+    dailyTasks,
     notificationSettings.hour,
     notificationSettings.minute,
     notificationSettings.enabled,
-    notificationSettings.taskIds
+    notificationSettings.taskIds,
+    notificationSettings.dateMode,
+    notificationSettings.repeatRule
   ]);
 
   useEffect(() => {
@@ -834,7 +1032,9 @@ export function HomeScreen() {
     setReminderEnabledDraft(notificationSettings.enabled);
     setReminderHourDraft(pad2(notificationSettings.hour));
     setReminderMinuteDraft(pad2(notificationSettings.minute));
-    setReminderTaskIdsDraft(notificationSettings.taskIds);
+    setReminderRepeatDraft(notificationSettings.repeatRule);
+    setReminderDateModeDraft(notificationSettings.dateMode);
+    setReminderTaskIdsDraft(notificationSettings.taskIds.filter((taskId) => dailyTaskIdSet.has(taskId)));
     setIsReminderOpen(true);
   }
 
@@ -863,13 +1063,35 @@ export function HomeScreen() {
       Alert.alert("输入有误", "提醒时间请输入 00:00 到 23:59");
       return;
     }
-    dispatch({
-      type: "SET_NOTIFICATION_SETTINGS",
+    const nextSettings = {
       enabled: reminderEnabledDraft,
       hour: Math.round(hourParsed),
       minute: Math.round(minuteParsed),
-      taskIds: reminderTaskIdsDraft
+      taskIds: reminderTaskIdsDraft.filter((taskId) => dailyTaskIdSet.has(taskId)),
+      dateMode: reminderDateModeDraft,
+      repeatRule: reminderRepeatDraft
+    };
+    if (
+      nextSettings.repeatRule === "once" &&
+      buildOnceReminderDate(nextSettings.dateMode, nextSettings.hour, nextSettings.minute).getTime() <= Date.now()
+    ) {
+      Alert.alert("时间已过", "单次提醒请设置为未来时间");
+      return;
+    }
+    dispatch({
+      type: "SET_NOTIFICATION_SETTINGS",
+      enabled: nextSettings.enabled,
+      hour: nextSettings.hour,
+      minute: nextSettings.minute,
+      taskIds: nextSettings.taskIds,
+      dateMode: nextSettings.dateMode,
+      repeatRule: nextSettings.repeatRule
     });
+    const modeText =
+      nextSettings.repeatRule === "once"
+        ? `${dateModeLabel(nextSettings.dateMode)} ${pad2(nextSettings.hour)}:${pad2(nextSettings.minute)}`
+        : `${repeatRuleLabel(nextSettings.repeatRule)} ${pad2(nextSettings.hour)}:${pad2(nextSettings.minute)}`;
+    showShortNotice(`提醒设置已保存 ${modeText}`);
     setIsReminderOpen(false);
   }
 
@@ -1861,7 +2083,7 @@ export function HomeScreen() {
       <Modal visible={isReminderOpen} transparent animationType="fade">
         <View style={styles.modalBackdrop}>
           <Pressable style={styles.modalBackdropPress} onPress={() => setIsReminderOpen(false)} />
-          <View style={styles.modalSheet}>
+          <View style={[styles.modalSheet, styles.reminderModalSheet]}>
             <View style={styles.modalHeader}>
               <Text style={styles.sectionTitle}>通知设置</Text>
               <Pressable onPress={() => setIsReminderOpen(false)} style={pressable(styles.linkButton)}>
@@ -1879,7 +2101,46 @@ export function HomeScreen() {
                 </Text>
               </View>
             </Pressable>
-            <Text style={styles.sectionMeta}>{`当前提醒时间 ${pad2(notificationSettings.hour)}:${pad2(notificationSettings.minute)}`}</Text>
+            <Text style={styles.sectionMeta}>{`当前提醒 ${reminderSummary}`}</Text>
+            <Text style={[styles.sectionTitle, !reminderEnabledDraft && styles.muted]}>周期设置</Text>
+            <View style={[styles.typeRow, !reminderEnabledDraft && styles.sectionDisabled]}>
+              {REMINDER_REPEAT_OPTIONS.map((item) => {
+                const isActive = reminderRepeatDraft === item.value;
+                return (
+                  <Pressable
+                    key={item.value}
+                    onPress={() => setReminderRepeatDraft(item.value)}
+                    style={pressable([styles.typeChip, isActive && styles.typeChipActive])}
+                  >
+                    <Text style={[styles.typeChipText, isActive && styles.typeChipTextActive]}>
+                      {item.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+            {reminderRepeatDraft === "once" ? (
+              <>
+                <Text style={[styles.sectionMeta, !reminderEnabledDraft && styles.muted]}>单次提醒日期</Text>
+                <View style={[styles.typeRow, !reminderEnabledDraft && styles.sectionDisabled]}>
+                  {REMINDER_DATE_OPTIONS.map((item) => {
+                    const isActive = reminderDateModeDraft === item.value;
+                    return (
+                      <Pressable
+                        key={item.value}
+                        onPress={() => setReminderDateModeDraft(item.value)}
+                        style={pressable([styles.typeChip, isActive && styles.typeChipActive])}
+                      >
+                        <Text style={[styles.typeChipText, isActive && styles.typeChipTextActive]}>
+                          {item.label}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </>
+            ) : null}
+            <Text style={[styles.sectionMeta, !reminderEnabledDraft && styles.muted]}>提醒时间</Text>
             <View style={[styles.reminderTimeRow, !reminderEnabledDraft && styles.sectionDisabled]}>
               <TextInput
                 value={reminderHourDraft}
@@ -1915,8 +2176,18 @@ export function HomeScreen() {
                     >
                       <View style={[styles.reminderTaskCheck, checked && styles.reminderTaskCheckActive]} />
                       <View style={styles.taskMainColumn}>
-                        <Text style={styles.taskTitle}>{task.title}</Text>
-                        <Text style={styles.taskMeta}>
+                        <Text
+                          style={styles.reminderTaskTitle}
+                          numberOfLines={2}
+                          ellipsizeMode="tail"
+                        >
+                          {task.title}
+                        </Text>
+                        <Text
+                          style={styles.reminderTaskMeta}
+                          numberOfLines={1}
+                          ellipsizeMode="tail"
+                        >
                           {`${task.planType === "daily" ? "每日任务" : "长期任务"} · 最高 ${task.maxPoints} 分 · 任务组 ${getGroupName(task.groupId)}`}
                         </Text>
                       </View>
@@ -1925,6 +2196,12 @@ export function HomeScreen() {
                 })
               )}
             </ScrollView>
+            <Pressable
+              onPress={handleTestReminderNotification}
+              style={pressable([styles.typeChip, styles.standaloneChip])}
+            >
+              <Text style={styles.typeChipText}>立即测试（5秒）</Text>
+            </Pressable>
             <Pressable onPress={handleSaveReminderSettings} style={pressable(styles.button)}>
               <Text style={styles.buttonText}>保存设置</Text>
             </Pressable>
@@ -2617,7 +2894,7 @@ const styles = StyleSheet.create({
     opacity: 0.5
   },
   reminderList: {
-    maxHeight: 260,
+    maxHeight: Math.min(420, SCREEN_HEIGHT * 0.5),
     marginTop: theme.spacing.sm,
     marginBottom: theme.spacing.sm
   },
@@ -2630,6 +2907,18 @@ const styles = StyleSheet.create({
   },
   reminderTaskRowActive: {
     backgroundColor: theme.colors.accentSoft
+  },
+  reminderTaskTitle: {
+    fontSize: theme.font.md,
+    color: theme.colors.text,
+    fontWeight: "600",
+    lineHeight: 20
+  },
+  reminderTaskMeta: {
+    fontSize: theme.font.sm,
+    color: theme.colors.muted,
+    marginTop: 2,
+    lineHeight: 18
   },
   reminderTaskCheck: {
     width: 16,
@@ -3065,6 +3354,9 @@ const styles = StyleSheet.create({
     borderTopRightRadius: theme.radius.lg,
     maxHeight: "70%"
   },
+  reminderModalSheet: {
+    maxHeight: "86%"
+  },
   confirmBackdrop: {
     flex: 1,
     backgroundColor: "rgba(12, 25, 33, 0.35)",
@@ -3139,6 +3431,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: theme.colors.border,
     backgroundColor: theme.colors.background
+  },
+  standaloneChip: {
+    flex: 0,
+    marginBottom: theme.spacing.sm
   },
   modalActionText: {
     fontSize: 12,

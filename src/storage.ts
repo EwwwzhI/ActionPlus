@@ -5,6 +5,8 @@ import {
   DEFAULT_GROUP,
   DEFAULT_GROUP_ID,
   AutoRule,
+  NotificationDateMode,
+  NotificationRepeatRule,
   NotificationSettings,
   PlanType,
   ScoreArchive,
@@ -145,13 +147,18 @@ function normalizeNotificationSettings(raw: unknown, tasks: Task[]): Notificatio
     ? Math.min(59, Math.max(0, Math.round(Number(data.minute))))
     : 0;
   const taskIdsRaw = Array.isArray(data.taskIds) ? data.taskIds : [];
-  const validTaskIdSet = new Set(tasks.map((task) => task.id));
+  const validTaskIdSet = new Set(tasks.filter((task) => task.planType === "daily").map((task) => task.id));
   const taskIds = Array.from(
     new Set(
       taskIdsRaw.filter((id): id is string => typeof id === "string" && validTaskIdSet.has(id))
     )
   );
-  return { enabled, hour, minute, taskIds };
+  const rawDateMode = (raw as { dateMode?: unknown }).dateMode;
+  const dateMode: NotificationDateMode = rawDateMode === "today" ? "today" : "tomorrow";
+  const rawRepeatRule = (raw as { repeatRule?: unknown }).repeatRule;
+  const repeatRule: NotificationRepeatRule =
+    rawRepeatRule === "once" || rawRepeatRule === "weekday" ? rawRepeatRule : "daily";
+  return { enabled, hour, minute, taskIds, dateMode, repeatRule };
 }
 
 export async function loadState(): Promise<AppState> {
