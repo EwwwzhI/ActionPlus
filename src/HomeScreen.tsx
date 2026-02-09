@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useReducer, useState } from "react";
 import {
+  AppState,
   Alert,
   Animated,
   Modal,
@@ -121,13 +122,37 @@ function parseDateKey(dateKey: string): Date | null {
   return startOfDay(date);
 }
 
-function buildReminderMessage(tasks: Task[]): { title: string; body: string } {
+function buildReminderMessage(tasks: Array<Pick<Task, "title">>): { title: string; body: string } {
   if (tasks.length === 0) {
     return { title: "任务提醒", body: "暂无已选择的提醒任务" };
   }
   const preview = tasks.slice(0, 3).map((task) => `• ${task.title}`).join("\n");
   const suffix = tasks.length > 3 ? `\n等 ${tasks.length} 项` : `\n共 ${tasks.length} 项`;
   return { title: "任务提醒", body: `${preview}${suffix}` };
+}
+
+function buildReminderSyncFingerprint(
+  settings: {
+    enabled: boolean;
+    hour: number;
+    minute: number;
+    dateMode: NotificationDateMode;
+    repeatRule: NotificationRepeatRule;
+  },
+  tasks: Array<{ id: string; title: string }>
+): string {
+  const taskPart = [...tasks]
+    .sort((a, b) => a.id.localeCompare(b.id))
+    .map((task) => `${task.id}:${task.title}`)
+    .join("|");
+  return [
+    settings.enabled ? "1" : "0",
+    String(settings.hour),
+    String(settings.minute),
+    settings.dateMode,
+    settings.repeatRule,
+    taskPart
+  ].join("~");
 }
 
 function pad2(value: number): string {
@@ -229,6 +254,9 @@ export function HomeScreen() {
   const rewardAnim = React.useRef(new Animated.Value(0)).current;
   const [rewardBurst, setRewardBurst] = useState<number | null>(null);
   const reminderSyncRunRef = React.useRef(0);
+  const lastReminderSyncFingerprintRef = React.useRef<string | null>(null);
+  const appStateRef = React.useRef(AppState.currentState);
+  const lastReminderResyncDateRef = React.useRef(formatLocalDate(new Date()));
   const [confirmState, setConfirmState] = useState<{
     title: string;
     message: string;
@@ -278,8 +306,14 @@ export function HomeScreen() {
       dateMode: NotificationDateMode;
       repeatRule: NotificationRepeatRule;
     },
-    showResultNotice = false
+    reminderTasks: Array<{ id: string; title: string }>,
+    scheduleFingerprint: string,
+    showResultNotice = false,
+    forceSync = false
   ): Promise<void> {
+    if (!forceSync && lastReminderSyncFingerprintRef.current === scheduleFingerprint) {
+      return;
+    }
     const runId = ++reminderSyncRunRef.current;
     const ready = await ensureNotificationPermissionAndChannel(showResultNotice);
     if (!ready) return;
@@ -294,23 +328,25 @@ export function HomeScreen() {
       if (runId !== reminderSyncRunRef.current) return;
 
       if (!settings.enabled) {
+        lastReminderSyncFingerprintRef.current = scheduleFingerprint;
         if (showResultNotice) showShortNotice("提醒已关闭");
         return;
       }
 
-      const idSet = new Set(settings.taskIds);
-      const tasks = dailyTasks.filter((task) => idSet.has(task.id));
-      if (tasks.length === 0) {
+      if (reminderTasks.length === 0) {
+        lastReminderSyncFingerprintRef.current = scheduleFingerprint;
         if (showResultNotice) {
           Alert.alert("未设置每日提醒任务", "请至少勾选 1 个每日任务后再保存提醒");
         }
         return;
       }
 
-      const message = buildReminderMessage(tasks);
+      const selectedTaskIds = reminderTasks.map((task) => task.id);
+      const message = buildReminderMessage(reminderTasks);
       if (settings.repeatRule === "once") {
         const targetDate = buildOnceReminderDate(settings.dateMode, settings.hour, settings.minute);
         if (targetDate.getTime() <= Date.now()) {
+          lastReminderSyncFingerprintRef.current = scheduleFingerprint;
           if (showResultNotice) {
             Alert.alert("时间已过", "单次提醒请设置为未来时间");
           }
@@ -322,7 +358,7 @@ export function HomeScreen() {
             body: message.body,
             data: {
               type: "task_reminder",
-              taskIds: settings.taskIds,
+              taskIds: selectedTaskIds,
               repeatRule: settings.repeatRule,
               dateMode: settings.dateMode
             }
@@ -347,7 +383,7 @@ export function HomeScreen() {
                 body: message.body,
                 data: {
                   type: "task_reminder",
-                  taskIds: settings.taskIds,
+                  taskIds: selectedTaskIds,
                   dayOffset: index,
                   repeatRule: settings.repeatRule
                 }
@@ -361,6 +397,7 @@ export function HomeScreen() {
         );
       }
       if (runId !== reminderSyncRunRef.current) return;
+      lastReminderSyncFingerprintRef.current = scheduleFingerprint;
 
       if (showResultNotice) {
         const modeText =
@@ -536,6 +573,33 @@ export function HomeScreen() {
         maxPoints: task.maxPoints
       }));
   }, [dailyTasks]);
+  const reminderTasksForSchedule = useMemo(() => {
+    const idSet = new Set(notificationSettings.taskIds);
+    return dailyTasks
+      .filter((task) => idSet.has(task.id))
+      .map((task) => ({ id: task.id, title: task.title }));
+  }, [dailyTasks, notificationSettings.taskIds]);
+  const reminderSyncFingerprint = useMemo(
+    () =>
+      buildReminderSyncFingerprint(
+        {
+          enabled: notificationSettings.enabled,
+          hour: notificationSettings.hour,
+          minute: notificationSettings.minute,
+          dateMode: notificationSettings.dateMode,
+          repeatRule: notificationSettings.repeatRule
+        },
+        reminderTasksForSchedule
+      ),
+    [
+      notificationSettings.enabled,
+      notificationSettings.hour,
+      notificationSettings.minute,
+      notificationSettings.dateMode,
+      notificationSettings.repeatRule,
+      reminderTasksForSchedule
+    ]
+  );
   const retentionDays = 120;
   const cutoffDateKey = useMemo(
     () => formatLocalDate(addDays(new Date(), -(retentionDays - 1))),
@@ -606,17 +670,49 @@ export function HomeScreen() {
         dateMode: notificationSettings.dateMode,
         repeatRule: notificationSettings.repeatRule
       },
+      reminderTasksForSchedule,
+      reminderSyncFingerprint,
       false
     );
+  }, [isReady, reminderTasksForSchedule, reminderSyncFingerprint]);
+
+  useEffect(() => {
+    if (!isReady) return;
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      const prevState = appStateRef.current;
+      appStateRef.current = nextState;
+      if (!(prevState.match(/inactive|background/) && nextState === "active")) return;
+      const today = formatLocalDate(new Date());
+      const dayChanged = lastReminderResyncDateRef.current !== today;
+      lastReminderResyncDateRef.current = today;
+      syncTaskReminderSchedule(
+        {
+          enabled: notificationSettings.enabled,
+          hour: notificationSettings.hour,
+          minute: notificationSettings.minute,
+          taskIds: notificationSettings.taskIds,
+          dateMode: notificationSettings.dateMode,
+          repeatRule: notificationSettings.repeatRule
+        },
+        reminderTasksForSchedule,
+        reminderSyncFingerprint,
+        false,
+        dayChanged
+      );
+    });
+    return () => {
+      subscription.remove();
+    };
   }, [
     isReady,
-    dailyTasks,
+    notificationSettings.enabled,
     notificationSettings.hour,
     notificationSettings.minute,
-    notificationSettings.enabled,
     notificationSettings.taskIds,
     notificationSettings.dateMode,
-    notificationSettings.repeatRule
+    notificationSettings.repeatRule,
+    reminderTasksForSchedule,
+    reminderSyncFingerprint
   ]);
 
   useEffect(() => {

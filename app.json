@@ -2,7 +2,7 @@
   "expo": {
     "name": "Action+",
     "slug": "action-plus",
-    "version": "1.3.0",
+    "version": "1.3.1",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "backgroundColor": "#F4EFE6",
@@ -19,7 +19,7 @@
       "splash": {
         "backgroundColor": "#F4EFE6"
       },
-      "permissions": ["POST_NOTIFICATIONS"]
+      "permissions": ["POST_NOTIFICATIONS", "SCHEDULE_EXACT_ALARM"]
     },
     "owner": "ewwwzhi",
     "extra": {
