@@ -148,12 +148,24 @@ function normalizeNotificationSettings(raw: unknown, tasks: Task[]): Notificatio
   if (!raw || typeof raw !== "object") {
     return initialState.notificationSettings;
   }
-  const data = raw as Partial<NotificationSettings>;
+  const data = raw as Partial<NotificationSettings> & { hour?: number; minute?: number };
   const enabled = typeof data.enabled === "boolean" ? data.enabled : true;
   const hour = Number.isFinite(data.hour) ? Math.min(23, Math.max(0, Math.round(Number(data.hour)))) : 8;
   const minute = Number.isFinite(data.minute)
     ? Math.min(59, Math.max(0, Math.round(Number(data.minute))))
     : 0;
+  const periodicHour = Number.isFinite(data.periodicHour)
+    ? Math.min(23, Math.max(0, Math.round(Number(data.periodicHour))))
+    : hour;
+  const periodicMinute = Number.isFinite(data.periodicMinute)
+    ? Math.min(59, Math.max(0, Math.round(Number(data.periodicMinute))))
+    : minute;
+  const singleHour = Number.isFinite(data.singleHour)
+    ? Math.min(23, Math.max(0, Math.round(Number(data.singleHour))))
+    : hour;
+  const singleMinute = Number.isFinite(data.singleMinute)
+    ? Math.min(59, Math.max(0, Math.round(Number(data.singleMinute))))
+    : minute;
   const taskIdsRaw = Array.isArray(data.taskIds) ? data.taskIds : [];
   const validTaskIdSet = new Set(tasks.filter((task) => task.planType === "daily").map((task) => task.id));
   const taskIds = Array.from(
@@ -168,7 +180,7 @@ function normalizeNotificationSettings(raw: unknown, tasks: Task[]): Notificatio
   const rawRepeatRule = (raw as { repeatRule?: unknown }).repeatRule;
   const repeatRule: NotificationRepeatRule =
     rawRepeatRule === "once" || rawRepeatRule === "weekday" ? rawRepeatRule : "daily";
-  return { enabled, hour, minute, taskIds, mode, dateMode, repeatRule };
+  return { enabled, periodicHour, periodicMinute, singleHour, singleMinute, taskIds, mode, dateMode, repeatRule };
 }
 
 function normalizeLongtermNotificationSettings(
@@ -217,25 +229,25 @@ export async function loadState(): Promise<AppState> {
     const todayKey = formatLocalDate(new Date());
     const groups = Array.isArray((data as { groups?: unknown[] }).groups)
       ? (data as { groups?: unknown[] }).groups
-          ?.map((item) => normalizeGroup(item))
-          .filter((item): item is TaskGroup => Boolean(item)) ?? []
+        ?.map((item) => normalizeGroup(item))
+        .filter((item): item is TaskGroup => Boolean(item)) ?? []
       : [];
     const finalGroups = groups.length > 0 ? groups : [DEFAULT_GROUP];
     const groupIds = new Set(finalGroups.map((group) => group.id));
     const tasks = Array.isArray(data.tasks)
       ? data.tasks
-          .map((item) => normalizeTask(item, todayKey, groupIds))
-          .filter((item): item is Task => Boolean(item))
+        .map((item) => normalizeTask(item, todayKey, groupIds))
+        .filter((item): item is Task => Boolean(item))
       : [];
     const templates = Array.isArray((data as { templates?: unknown[] }).templates)
       ? (data as { templates?: unknown[] }).templates
-          ?.map((item) => normalizeTemplate(item))
-          .filter((item): item is TaskTemplate => Boolean(item)) ?? []
+        ?.map((item) => normalizeTemplate(item))
+        .filter((item): item is TaskTemplate => Boolean(item)) ?? []
       : [];
     const archives = Array.isArray((data as { archives?: unknown[] }).archives)
       ? (data as { archives?: unknown[] }).archives
-          ?.map((item) => normalizeArchive(item))
-          .filter((item): item is ScoreArchive => Boolean(item)) ?? []
+        ?.map((item) => normalizeArchive(item))
+        .filter((item): item is ScoreArchive => Boolean(item)) ?? []
       : [];
     const normalizedTemplates = templates.map((template) =>
       groupIds.has(template.groupId) ? template : { ...template, groupId: DEFAULT_GROUP_ID }

@@ -37,8 +37,10 @@ export type LongtermReminderIntervalRule = "none" | "weekly" | "every14Days" | "
 
 export type NotificationSettings = {
   enabled: boolean;
-  hour: number;
-  minute: number;
+  periodicHour: number;
+  periodicMinute: number;
+  singleHour: number;
+  singleMinute: number;
   taskIds: string[];
   mode: NotificationMode;
   dateMode: NotificationDateMode;
@@ -101,8 +103,10 @@ export const initialState: AppState = {
   archiveSettings: { cycleDays: 30, periodStart: null },
   notificationSettings: {
     enabled: true,
-    hour: 8,
-    minute: 0,
+    periodicHour: 8,
+    periodicMinute: 0,
+    singleHour: 8,
+    singleMinute: 0,
     taskIds: [],
     mode: "global_rule",
     dateMode: "tomorrow",
@@ -125,24 +129,26 @@ export type Action =
   | { type: "DELETE_GROUP"; groupId: string }
   | { type: "SET_ARCHIVE_CYCLE"; cycleDays: number; periodStart: string }
   | {
-      type: "SET_NOTIFICATION_SETTINGS";
-      enabled: boolean;
-      hour: number;
-      minute: number;
-      taskIds: string[];
-      mode: NotificationMode;
-      dateMode: NotificationDateMode;
-      repeatRule: NotificationRepeatRule;
-    }
+    type: "SET_NOTIFICATION_SETTINGS";
+    enabled: boolean;
+    periodicHour: number;
+    periodicMinute: number;
+    singleHour: number;
+    singleMinute: number;
+    taskIds: string[];
+    mode: NotificationMode;
+    dateMode: NotificationDateMode;
+    repeatRule: NotificationRepeatRule;
+  }
   | {
-      type: "SET_LONGTERM_NOTIFICATION_SETTINGS";
-      enabled: boolean;
-      hour: number;
-      minute: number;
-      taskIds: string[];
-      deadlineOffsets: number[];
-      intervalRule: LongtermReminderIntervalRule;
-    }
+    type: "SET_LONGTERM_NOTIFICATION_SETTINGS";
+    enabled: boolean;
+    hour: number;
+    minute: number;
+    taskIds: string[];
+    deadlineOffsets: number[];
+    intervalRule: LongtermReminderIntervalRule;
+  }
   | { type: "AUTO_ARCHIVE"; cycleDays: number; nextStart: string; endDate: string }
   | { type: "ADD_TASK"; task: Task }
   | { type: "TOGGLE_TASK"; taskId: string }
@@ -152,6 +158,7 @@ export type Action =
   | { type: "TOGGLE_TEMPLATE_AUTO"; templateId: string; enabled: boolean }
   | { type: "SET_TEMPLATE_AUTO_RULE"; templateId: string; rule: AutoRule }
   | { type: "DELETE_TEMPLATE"; templateId: string }
+  | { type: "LINK_TASK_TO_TEMPLATE"; taskId: string; templateId: string }
   | { type: "DELETE_TASK"; taskId: string }
   | { type: "CLEANUP_OLD_RECORDS"; cutoffDate: string };
 
@@ -220,8 +227,10 @@ export function reducer(state: AppState, action: Action): AppState {
     }
     case "SET_NOTIFICATION_SETTINGS": {
       const enabled = Boolean(action.enabled);
-      const hour = Math.min(23, Math.max(0, Math.round(action.hour)));
-      const minute = Math.min(59, Math.max(0, Math.round(action.minute)));
+      const periodicHour = Math.min(23, Math.max(0, Math.round(action.periodicHour)));
+      const periodicMinute = Math.min(59, Math.max(0, Math.round(action.periodicMinute)));
+      const singleHour = Math.min(23, Math.max(0, Math.round(action.singleHour)));
+      const singleMinute = Math.min(59, Math.max(0, Math.round(action.singleMinute)));
       const taskIds = Array.from(new Set(action.taskIds.filter((id) => typeof id === "string" && id)));
       const mode: NotificationMode = action.mode === "follow_task" ? "follow_task" : "global_rule";
       const dateMode = action.dateMode === "today" ? "today" : "tomorrow";
@@ -231,8 +240,10 @@ export function reducer(state: AppState, action: Action): AppState {
         ...state,
         notificationSettings: {
           enabled,
-          hour,
-          minute,
+          periodicHour,
+          periodicMinute,
+          singleHour,
+          singleMinute,
           taskIds,
           mode,
           dateMode,
@@ -255,8 +266,8 @@ export function reducer(state: AppState, action: Action): AppState {
       ).sort((a, b) => b - a);
       const intervalRule: LongtermReminderIntervalRule =
         action.intervalRule === "weekly" ||
-        action.intervalRule === "every14Days" ||
-        action.intervalRule === "every30Days"
+          action.intervalRule === "every14Days" ||
+          action.intervalRule === "every30Days"
           ? action.intervalRule
           : "none";
       return {
@@ -361,7 +372,15 @@ export function reducer(state: AppState, action: Action): AppState {
         }
         return { ...item, autoDaily: true, autoRule: item.autoRule ?? "daily" };
       });
-      return { ...state, templates };
+      let tasks = state.tasks;
+      if (!action.enabled) {
+        tasks = state.tasks.map((task) =>
+          task.sourceTemplateId === action.templateId
+            ? { ...task, sourceTemplateId: undefined }
+            : task
+        );
+      }
+      return { ...state, templates, tasks };
     }
     case "SET_TEMPLATE_AUTO_RULE": {
       const templates = state.templates.map((item) => {
@@ -372,8 +391,23 @@ export function reducer(state: AppState, action: Action): AppState {
       });
       return { ...state, templates };
     }
-    case "DELETE_TEMPLATE":
-      return { ...state, templates: state.templates.filter((item) => item.id !== action.templateId) };
+    case "DELETE_TEMPLATE": {
+      const remainingTemplates = state.templates.filter((item) => item.id !== action.templateId);
+      const unlinkTasks = state.tasks.map((task) =>
+        task.sourceTemplateId === action.templateId
+          ? { ...task, sourceTemplateId: undefined }
+          : task
+      );
+      return { ...state, templates: remainingTemplates, tasks: unlinkTasks };
+    }
+    case "LINK_TASK_TO_TEMPLATE": {
+      const linkedTasks = state.tasks.map((task) =>
+        task.id === action.taskId
+          ? { ...task, sourceTemplateId: action.templateId }
+          : task
+      );
+      return { ...state, tasks: linkedTasks };
+    }
     case "DELETE_TASK": {
       const target = state.tasks.find((task) => task.id === action.taskId);
       const tasks = state.tasks.filter((task) => task.id !== action.taskId);

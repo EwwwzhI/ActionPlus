@@ -147,8 +147,10 @@ function buildReminderMessage(tasks: Array<Pick<Task, "title">>): { title: strin
 function buildReminderSyncFingerprint(
   settings: {
     enabled: boolean;
-    hour: number;
-    minute: number;
+    periodicHour: number;
+    periodicMinute: number;
+    singleHour: number;
+    singleMinute: number;
     mode: NotificationMode;
     dateMode: NotificationDateMode;
     repeatRule: NotificationRepeatRule;
@@ -161,8 +163,10 @@ function buildReminderSyncFingerprint(
     .join("|");
   return [
     settings.enabled ? "1" : "0",
-    String(settings.hour),
-    String(settings.minute),
+    String(settings.periodicHour),
+    String(settings.periodicMinute),
+    String(settings.singleHour),
+    String(settings.singleMinute),
     settings.mode,
     settings.dateMode,
     settings.repeatRule,
@@ -308,6 +312,7 @@ export function HomeScreen() {
   const monthWheelRef = React.useRef<ScrollView | null>(null);
   const dayWheelRef = React.useRef<ScrollView | null>(null);
   const [isCreateTemplateDropdownOpen, setIsCreateTemplateDropdownOpen] = useState(false);
+  const [createFromTemplateId, setCreateFromTemplateId] = useState<string | null>(null);
   const [dailyTargetKey, setDailyTargetKey] = useState(() => formatLocalDate(addDays(new Date(), 1)));
   const [earnedDrafts, setEarnedDrafts] = useState<Record<string, string>>({});
   const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
@@ -324,8 +329,10 @@ export function HomeScreen() {
   const [reminderPanel, setReminderPanel] = useState<"daily" | "longterm">("daily");
   const [dailyReminderTaskPage, setDailyReminderTaskPage] = useState<"periodic" | "single">("periodic");
   const [reminderEnabledDraft, setReminderEnabledDraft] = useState(true);
-  const [reminderHourDraft, setReminderHourDraft] = useState("08");
-  const [reminderMinuteDraft, setReminderMinuteDraft] = useState("00");
+  const [periodicReminderHourDraft, setPeriodicReminderHourDraft] = useState("08");
+  const [periodicReminderMinuteDraft, setPeriodicReminderMinuteDraft] = useState("00");
+  const [singleReminderHourDraft, setSingleReminderHourDraft] = useState("08");
+  const [singleReminderMinuteDraft, setSingleReminderMinuteDraft] = useState("00");
   const [reminderTaskIdsDraft, setReminderTaskIdsDraft] = useState<string[]>([]);
   const [reminderDateModeDraft, setReminderDateModeDraft] = useState<NotificationDateMode>("tomorrow");
   const [longtermReminderEnabledDraft, setLongtermReminderEnabledDraft] = useState(false);
@@ -351,9 +358,9 @@ export function HomeScreen() {
     title: string;
     message: string;
     action:
-      | { type: "deleteGroup"; groupId: string }
-      | { type: "deleteTask"; taskId: string }
-      | { type: "deleteTemplate"; templateId: string };
+    | { type: "deleteGroup"; groupId: string }
+    | { type: "deleteTask"; taskId: string }
+    | { type: "deleteTemplate"; templateId: string };
   } | null>(null);
   const todayKey = formatLocalDate(new Date());
   const tomorrowKey = formatLocalDate(addDays(new Date(), 1));
@@ -390,8 +397,10 @@ export function HomeScreen() {
   async function syncTaskReminderSchedule(
     settings: {
       enabled: boolean;
-      hour: number;
-      minute: number;
+      periodicHour: number;
+      periodicMinute: number;
+      singleHour: number;
+      singleMinute: number;
       taskIds: string[];
       mode: NotificationMode;
       dateMode: NotificationDateMode;
@@ -436,7 +445,7 @@ export function HomeScreen() {
       const singleTasks = reminderTasks.filter((task) => typeof task.autoRule !== "string");
       let scheduledCount = 0;
       if (singleTasks.length > 0) {
-        const singleTargetDate = buildOnceReminderDate(settings.dateMode, settings.hour, settings.minute);
+        const singleTargetDate = buildOnceReminderDate(settings.dateMode, settings.singleHour, settings.singleMinute);
         if (singleTargetDate.getTime() > Date.now()) {
           const singleMessage = buildReminderMessage(singleTasks);
           await Notifications.scheduleNotificationAsync({
@@ -461,8 +470,8 @@ export function HomeScreen() {
       const periodicMessage = buildReminderMessage(periodicTasks);
       if (periodicTasks.length > 0 && settings.mode === "follow_task") {
         const upcomingDates = buildUpcomingReminderDates(
-          settings.hour,
-          settings.minute,
+          settings.periodicHour,
+          settings.periodicMinute,
           REMINDER_SCHEDULE_DAYS,
           "daily"
         );
@@ -491,7 +500,7 @@ export function HomeScreen() {
           })
         );
       } else if (periodicTasks.length > 0 && settings.repeatRule === "once") {
-        const targetDate = buildOnceReminderDate(settings.dateMode, settings.hour, settings.minute);
+        const targetDate = buildOnceReminderDate(settings.dateMode, settings.periodicHour, settings.periodicMinute);
         if (targetDate.getTime() <= Date.now()) {
           if (singleTasks.length === 0) {
             lastReminderSyncFingerprintRef.current = scheduleFingerprint;
@@ -521,8 +530,8 @@ export function HomeScreen() {
         }
       } else if (periodicTasks.length > 0) {
         const upcomingDates = buildUpcomingReminderDates(
-          settings.hour,
-          settings.minute,
+          settings.periodicHour,
+          settings.periodicMinute,
           REMINDER_SCHEDULE_DAYS,
           settings.repeatRule
         );
@@ -560,13 +569,11 @@ export function HomeScreen() {
       if (runId !== reminderSyncRunRef.current) return;
       lastReminderSyncFingerprintRef.current = scheduleFingerprint;
 
-        if (showResultNotice) {
-          const modeText =
-            settings.mode === "follow_task"
-              ? `跟随任务周期 ${pad2(settings.hour)}:${pad2(settings.minute)}`
-              : settings.repeatRule === "once"
-                ? `${dateModeLabel(settings.dateMode)} ${pad2(settings.hour)}:${pad2(settings.minute)}`
-                : `${repeatRuleLabel(settings.repeatRule)} ${pad2(settings.hour)}:${pad2(settings.minute)}`;
+      if (showResultNotice) {
+        const modeText =
+          settings.mode === "follow_task"
+            ? `周期 ${pad2(settings.periodicHour)}:${pad2(settings.periodicMinute)} / 单次 ${dateModeLabel(settings.dateMode)} ${pad2(settings.singleHour)}:${pad2(settings.singleMinute)}`
+            : `单次 ${dateModeLabel(settings.dateMode)} ${pad2(settings.singleHour)}:${pad2(settings.singleMinute)}`;
         showShortNotice(`提醒已设置 ${modeText}`);
       }
     } catch (error) {
@@ -721,8 +728,8 @@ export function HomeScreen() {
     const selectedPeriodicGroups =
       kind === "periodic"
         ? periodicReminderDisplayOptions.filter((item) =>
-            item.taskIds.every((taskId) => reminderTaskIdsDraft.includes(taskId))
-          )
+          item.taskIds.every((taskId) => reminderTaskIdsDraft.includes(taskId))
+        )
         : [];
     const selectedSingleTasks =
       kind === "single" ? singleReminderTaskOptions.filter((task) => reminderTaskIdsDraft.includes(task.id)) : [];
@@ -905,14 +912,8 @@ export function HomeScreen() {
   };
   const reminderSummary =
     notificationSettings.mode === "follow_task"
-      ? `跟随任务周期 ${pad2(notificationSettings.hour)}:${pad2(notificationSettings.minute)}`
-      : notificationSettings.repeatRule === "once"
-      ? `单次 ${dateModeLabel(notificationSettings.dateMode)} ${pad2(notificationSettings.hour)}:${pad2(
-          notificationSettings.minute
-        )}`
-      : `${repeatRuleLabel(notificationSettings.repeatRule)} ${pad2(notificationSettings.hour)}:${pad2(
-          notificationSettings.minute
-        )}`;
+      ? `周期 ${pad2(notificationSettings.periodicHour)}:${pad2(notificationSettings.periodicMinute)} / 单次 ${dateModeLabel(notificationSettings.dateMode)} ${pad2(notificationSettings.singleHour)}:${pad2(notificationSettings.singleMinute)}`
+      : `单次 ${dateModeLabel(notificationSettings.dateMode)} ${pad2(notificationSettings.singleHour)}:${pad2(notificationSettings.singleMinute)}`;
   const dailyTaskIdSet = useMemo(() => new Set(dailyTasks.map((task) => task.id)), [dailyTasks]);
   const reminderTaskOptions = useMemo(() => {
     return [...dailyTasks]
@@ -1035,10 +1036,10 @@ export function HomeScreen() {
   const longtermReminderSummary = useMemo(() => {
     const offsetText = longtermNotificationSettings.deadlineOffsets.length
       ? longtermNotificationSettings.deadlineOffsets
-          .slice()
-          .sort((a, b) => b - a)
-          .map((offset) => (offset === 0 ? "当天" : `提前${offset}天`))
-          .join("/")
+        .slice()
+        .sort((a, b) => b - a)
+        .map((offset) => (offset === 0 ? "当天" : `提前${offset}天`))
+        .join("/")
       : "无";
     return `${pad2(longtermNotificationSettings.hour)}:${pad2(longtermNotificationSettings.minute)} · 截止提醒 ${offsetText} · 周期 ${longtermIntervalLabel(
       longtermNotificationSettings.intervalRule
@@ -1075,8 +1076,10 @@ export function HomeScreen() {
       buildReminderSyncFingerprint(
         {
           enabled: notificationSettings.enabled,
-          hour: notificationSettings.hour,
-          minute: notificationSettings.minute,
+          periodicHour: notificationSettings.periodicHour,
+          periodicMinute: notificationSettings.periodicMinute,
+          singleHour: notificationSettings.singleHour,
+          singleMinute: notificationSettings.singleMinute,
           mode: notificationSettings.mode,
           dateMode: notificationSettings.dateMode,
           repeatRule: notificationSettings.repeatRule
@@ -1085,8 +1088,10 @@ export function HomeScreen() {
       ),
     [
       notificationSettings.enabled,
-      notificationSettings.hour,
-      notificationSettings.minute,
+      notificationSettings.periodicHour,
+      notificationSettings.periodicMinute,
+      notificationSettings.singleHour,
+      notificationSettings.singleMinute,
       notificationSettings.mode,
       notificationSettings.dateMode,
       notificationSettings.repeatRule,
@@ -1157,8 +1162,10 @@ export function HomeScreen() {
     syncTaskReminderSchedule(
       {
         enabled: notificationSettings.enabled,
-        hour: notificationSettings.hour,
-        minute: notificationSettings.minute,
+        periodicHour: notificationSettings.periodicHour,
+        periodicMinute: notificationSettings.periodicMinute,
+        singleHour: notificationSettings.singleHour,
+        singleMinute: notificationSettings.singleMinute,
         taskIds: notificationSettings.taskIds,
         mode: notificationSettings.mode,
         dateMode: notificationSettings.dateMode,
@@ -1199,8 +1206,10 @@ export function HomeScreen() {
       syncTaskReminderSchedule(
         {
           enabled: notificationSettings.enabled,
-          hour: notificationSettings.hour,
-          minute: notificationSettings.minute,
+          periodicHour: notificationSettings.periodicHour,
+          periodicMinute: notificationSettings.periodicMinute,
+          singleHour: notificationSettings.singleHour,
+          singleMinute: notificationSettings.singleMinute,
           taskIds: notificationSettings.taskIds,
           mode: notificationSettings.mode,
           dateMode: notificationSettings.dateMode,
@@ -1232,8 +1241,10 @@ export function HomeScreen() {
   }, [
     isReady,
     notificationSettings.enabled,
-    notificationSettings.hour,
-    notificationSettings.minute,
+    notificationSettings.periodicHour,
+    notificationSettings.periodicMinute,
+    notificationSettings.singleHour,
+    notificationSettings.singleMinute,
     notificationSettings.taskIds,
     notificationSettings.mode,
     notificationSettings.dateMode,
@@ -1629,6 +1640,7 @@ export function HomeScreen() {
       title,
       groupId: activeGroup.id,
       planType: newTaskType,
+      sourceTemplateId: createFromTemplateId ?? undefined,
       detailNote,
       maxPoints: points,
       earnedPoints: null,
@@ -1642,6 +1654,7 @@ export function HomeScreen() {
     setTaskPoints("");
     setTaskDetailNote("");
     setLongtermDeadlineDraft("");
+    setCreateFromTemplateId(null);
     setIsCreateTemplateDropdownOpen(false);
     setIsTaskModalOpen(false);
   }
@@ -1651,6 +1664,7 @@ export function HomeScreen() {
     setTaskPoints(String(template.maxPoints));
     setActiveGroupId(template.groupId);
     setLongtermDeadlineDraft("");
+    setCreateFromTemplateId(template.id);
     setIsCreateTemplateDropdownOpen(false);
   }
 
@@ -1704,8 +1718,10 @@ export function HomeScreen() {
     setReminderPanel("daily");
     setDailyReminderTaskPage(hasPeriodicReminderTasks ? "periodic" : "single");
     setReminderEnabledDraft(notificationSettings.enabled);
-    setReminderHourDraft(pad2(notificationSettings.hour));
-    setReminderMinuteDraft(pad2(notificationSettings.minute));
+    setPeriodicReminderHourDraft(pad2(notificationSettings.periodicHour));
+    setPeriodicReminderMinuteDraft(pad2(notificationSettings.periodicMinute));
+    setSingleReminderHourDraft(pad2(notificationSettings.singleHour));
+    setSingleReminderMinuteDraft(pad2(notificationSettings.singleMinute));
     setReminderDateModeDraft(notificationSettings.dateMode);
     setReminderTaskIdsDraft(notificationSettings.taskIds.filter((taskId) => dailyTaskIdSet.has(taskId)));
     setLongtermReminderEnabledDraft(longtermNotificationSettings.enabled);
@@ -1730,9 +1746,9 @@ export function HomeScreen() {
     setIsArchiveOpen(false);
   }
 
-  function handleSaveReminderSettings() {
-    const hourParsed = Number(reminderHourDraft);
-    const minuteParsed = Number(reminderMinuteDraft);
+  function handleSavePeriodicReminderSettings() {
+    const hourParsed = Number(periodicReminderHourDraft);
+    const minuteParsed = Number(periodicReminderMinuteDraft);
     if (
       !Number.isFinite(hourParsed) ||
       !Number.isFinite(minuteParsed) ||
@@ -1741,35 +1757,80 @@ export function HomeScreen() {
       minuteParsed < 0 ||
       minuteParsed > 59
     ) {
-      Alert.alert("输入有误", "提醒时间请输入 00:00 到 23:59");
+      Alert.alert("输入有误", "周期任务提醒时间请输入 00:00 到 23:59");
       return;
     }
-    const nextSettings = {
-      enabled: reminderEnabledDraft,
-      hour: Math.round(hourParsed),
-      minute: Math.round(minuteParsed),
-      taskIds: reminderTaskIdsDraft.filter((taskId) => reminderTaskOptionIdSet.has(taskId)),
-      dateMode: reminderDateModeDraft,
-      repeatRule: "once" as NotificationRepeatRule
-    };
-    const normalizedMode: NotificationMode = hasPeriodicReminderTasks ? "follow_task" : "global_rule";
-    const normalizedRepeatRule = hasPeriodicReminderTasks ? nextSettings.repeatRule : "once";
-    const selectedTaskItems = reminderTaskOptions.filter((task) => nextSettings.taskIds.includes(task.id));
+    const periodicHour = Math.round(hourParsed);
+    const periodicMinute = Math.round(minuteParsed);
+    const selectedTaskItems = reminderTaskOptions.filter((task) => reminderTaskIdsDraft.includes(task.id));
     const periodicTaskIds = selectedTaskItems
       .filter((task) => typeof task.autoRule === "string")
       .map((task) => task.id);
-    const singleTaskIds = selectedTaskItems
-      .filter((task) => typeof task.autoRule !== "string")
-      .map((task) => task.id);
-    const normalizedTaskIds =
-      [...periodicTaskIds, ...singleTaskIds];
+    const otherTaskIds = notificationSettings.taskIds.filter((id) => {
+      const task = reminderTaskOptions.find((t) => t.id === id);
+      return !task || typeof task.autoRule !== "string";
+    });
+    dispatch({
+      type: "SET_NOTIFICATION_SETTINGS",
+      enabled: reminderEnabledDraft,
+      periodicHour,
+      periodicMinute,
+      singleHour: notificationSettings.singleHour,
+      singleMinute: notificationSettings.singleMinute,
+      taskIds: [...periodicTaskIds, ...otherTaskIds],
+      mode: hasPeriodicReminderTasks ? "follow_task" : "global_rule",
+      dateMode: notificationSettings.dateMode,
+      repeatRule: notificationSettings.repeatRule
+    });
+    showShortNotice(`周期任务提醒已保存 ${pad2(periodicHour)}:${pad2(periodicMinute)}`);
+    setIsReminderOpen(false);
+  }
+
+  function handleSaveSingleReminderSettings() {
+    const hourParsed = Number(singleReminderHourDraft);
+    const minuteParsed = Number(singleReminderMinuteDraft);
     if (
-      normalizedRepeatRule === "once" &&
-      buildOnceReminderDate(nextSettings.dateMode, nextSettings.hour, nextSettings.minute).getTime() <= Date.now()
+      !Number.isFinite(hourParsed) ||
+      !Number.isFinite(minuteParsed) ||
+      hourParsed < 0 ||
+      hourParsed > 23 ||
+      minuteParsed < 0 ||
+      minuteParsed > 59
     ) {
+      Alert.alert("输入有误", "单次任务提醒时间请输入 00:00 到 23:59");
+      return;
+    }
+    const singleHour = Math.round(hourParsed);
+    const singleMinute = Math.round(minuteParsed);
+    if (buildOnceReminderDate(reminderDateModeDraft, singleHour, singleMinute).getTime() <= Date.now()) {
       Alert.alert("时间已过", "单次提醒请设置为未来时间");
       return;
     }
+    const selectedTaskItems = reminderTaskOptions.filter((task) => reminderTaskIdsDraft.includes(task.id));
+    const singleTaskIds = selectedTaskItems
+      .filter((task) => typeof task.autoRule !== "string")
+      .map((task) => task.id);
+    const otherTaskIds = notificationSettings.taskIds.filter((id) => {
+      const task = reminderTaskOptions.find((t) => t.id === id);
+      return !task || typeof task.autoRule === "string";
+    });
+    dispatch({
+      type: "SET_NOTIFICATION_SETTINGS",
+      enabled: reminderEnabledDraft,
+      periodicHour: notificationSettings.periodicHour,
+      periodicMinute: notificationSettings.periodicMinute,
+      singleHour,
+      singleMinute,
+      taskIds: [...singleTaskIds, ...otherTaskIds],
+      mode: hasPeriodicReminderTasks ? "follow_task" : "global_rule",
+      dateMode: reminderDateModeDraft,
+      repeatRule: "once"
+    });
+    showShortNotice(`单次任务提醒已保存 ${dateModeLabel(reminderDateModeDraft)} ${pad2(singleHour)}:${pad2(singleMinute)}`);
+    setIsReminderOpen(false);
+  }
+
+  function handleSaveLongtermReminderSettings() {
     const longtermHourParsed = Number(longtermReminderHourDraft);
     const longtermMinuteParsed = Number(longtermReminderMinuteDraft);
     if (
@@ -1804,16 +1865,6 @@ export function HomeScreen() {
       return;
     }
     dispatch({
-      type: "SET_NOTIFICATION_SETTINGS",
-      enabled: nextSettings.enabled,
-      hour: nextSettings.hour,
-      minute: nextSettings.minute,
-      taskIds: normalizedTaskIds,
-      mode: normalizedMode,
-      dateMode: nextSettings.dateMode,
-      repeatRule: normalizedRepeatRule
-    });
-    dispatch({
       type: "SET_LONGTERM_NOTIFICATION_SETTINGS",
       enabled: longtermSettings.enabled,
       hour: longtermSettings.hour,
@@ -1822,13 +1873,7 @@ export function HomeScreen() {
       deadlineOffsets: longtermSettings.deadlineOffsets,
       intervalRule: longtermSettings.intervalRule
     });
-    const modeText =
-      normalizedMode === "follow_task"
-        ? `跟随任务周期 ${pad2(nextSettings.hour)}:${pad2(nextSettings.minute)}`
-        : normalizedRepeatRule === "once"
-          ? `${dateModeLabel(nextSettings.dateMode)} ${pad2(nextSettings.hour)}:${pad2(nextSettings.minute)}`
-          : `${repeatRuleLabel(normalizedRepeatRule)} ${pad2(nextSettings.hour)}:${pad2(nextSettings.minute)}`;
-    showShortNotice(`提醒设置已保存 ${modeText}｜长期 ${pad2(longtermSettings.hour)}:${pad2(longtermSettings.minute)}`);
+    showShortNotice(`长期提醒已保存 ${pad2(longtermSettings.hour)}:${pad2(longtermSettings.minute)}`);
     setIsReminderOpen(false);
   }
 
@@ -1939,6 +1984,7 @@ export function HomeScreen() {
       createdAt: Date.now()
     };
     dispatch({ type: "ADD_TEMPLATE", template });
+    dispatch({ type: "LINK_TASK_TO_TEMPLATE", taskId: task.id, templateId: template.id });
     showShortNotice("已成功保存到任务库");
   }
 
@@ -2706,59 +2752,59 @@ export function HomeScreen() {
                 dailyTemplates.length === 0 ? (
                   <Text style={styles.muted}>暂无任务库内容</Text>
                 ) : (
-                dailyTemplates.map((template) => (
-                  <View key={template.id} style={styles.taskRow}>
-                    <View style={styles.taskMainColumn}>
-                      <Text style={styles.taskTitle}>{template.title}</Text>
-                      <Text
-                        style={styles.taskMeta}
-                      >{`最高 ${template.maxPoints} 分 · 任务组 ${getGroupName(template.groupId)}`}</Text>
-                    </View>
-                    <Pressable
-                      onPress={() =>
-                        dispatch({
-                          type: "TOGGLE_TEMPLATE_AUTO",
-                          templateId: template.id,
-                          enabled: !template.autoDaily
-                        })
-                      }
-                      style={pressable([styles.autoIconButton, template.autoDaily && styles.autoIconButtonActive])}
-                    >
-                      <Text style={[styles.autoIconText, template.autoDaily && styles.autoIconTextActive]}>
-                        ⚡
-                      </Text>
-                    </Pressable>
-                    {template.autoDaily ? (
+                  dailyTemplates.map((template) => (
+                    <View key={template.id} style={styles.taskRow}>
+                      <View style={styles.taskMainColumn}>
+                        <Text style={styles.taskTitle}>{template.title}</Text>
+                        <Text
+                          style={styles.taskMeta}
+                        >{`最高 ${template.maxPoints} 分 · 任务组 ${getGroupName(template.groupId)}`}</Text>
+                      </View>
                       <Pressable
                         onPress={() =>
                           dispatch({
-                            type: "SET_TEMPLATE_AUTO_RULE",
+                            type: "TOGGLE_TEMPLATE_AUTO",
                             templateId: template.id,
-                            rule: nextAutoRule(template.autoRule)
+                            enabled: !template.autoDaily
                           })
                         }
-                        style={pressable(styles.ruleChip)}
+                        style={pressable([styles.autoIconButton, template.autoDaily && styles.autoIconButtonActive])}
                       >
-                        <Text style={styles.ruleChipText}>{getAutoRuleLabel(template.autoRule)}</Text>
+                        <Text style={[styles.autoIconText, template.autoDaily && styles.autoIconTextActive]}>
+                          ⚡
+                        </Text>
                       </Pressable>
-                    ) : null}
-                    <Pressable
-                      onPress={() =>
-                        setConfirmState({
-                          title: "删除模板",
-                          message: "确定删除该模板",
-                          action: { type: "deleteTemplate", templateId: template.id }
-                        })
-                      }
-                      style={pressable(styles.actionIconButton)}
-                      accessibilityLabel="删除"
-                    >
-                      <Text style={[styles.actionIconText, styles.actionIconDanger]}>🗑</Text>
-                    </Pressable>
-                  </View>
-                ))
-              )
-            ) : longtermTemplates.length === 0 ? (
+                      {template.autoDaily ? (
+                        <Pressable
+                          onPress={() =>
+                            dispatch({
+                              type: "SET_TEMPLATE_AUTO_RULE",
+                              templateId: template.id,
+                              rule: nextAutoRule(template.autoRule)
+                            })
+                          }
+                          style={pressable(styles.ruleChip)}
+                        >
+                          <Text style={styles.ruleChipText}>{getAutoRuleLabel(template.autoRule)}</Text>
+                        </Pressable>
+                      ) : null}
+                      <Pressable
+                        onPress={() =>
+                          setConfirmState({
+                            title: "删除模板",
+                            message: "确定删除该模板",
+                            action: { type: "deleteTemplate", templateId: template.id }
+                          })
+                        }
+                        style={pressable(styles.actionIconButton)}
+                        accessibilityLabel="删除"
+                      >
+                        <Text style={[styles.actionIconText, styles.actionIconDanger]}>🗑</Text>
+                      </Pressable>
+                    </View>
+                  ))
+                )
+              ) : longtermTemplates.length === 0 ? (
                 <Text style={styles.muted}>暂无任务库内容</Text>
               ) : (
                 longtermTemplates.map((template) => (
@@ -2977,26 +3023,6 @@ export function HomeScreen() {
                     </View>
                   </>
                 )}
-                <Text style={[styles.sectionMeta, !reminderEnabledDraft && styles.muted]}>提醒时间</Text>
-                <View style={[styles.reminderTimeRow, !reminderEnabledDraft && styles.sectionDisabled]}>
-                  <TextInput
-                    value={reminderHourDraft}
-                    onChangeText={setReminderHourDraft}
-                    placeholder="时"
-                    placeholderTextColor={theme.colors.muted}
-                    keyboardType="number-pad"
-                    style={[styles.input, styles.inputSmall]}
-                  />
-                  <Text style={styles.sectionTitle}>:</Text>
-                  <TextInput
-                    value={reminderMinuteDraft}
-                    onChangeText={setReminderMinuteDraft}
-                    placeholder="分"
-                    placeholderTextColor={theme.colors.muted}
-                    keyboardType="number-pad"
-                    style={[styles.input, styles.inputSmall]}
-                  />
-                </View>
                 <Text style={[styles.sectionTitle, !reminderEnabledDraft && styles.muted]}>选择任务</Text>
                 <ScrollView style={[styles.reminderList, !reminderEnabledDraft && styles.sectionDisabled]}>
                   {dailyReminderTaskPage === "periodic" ? (
@@ -3041,13 +3067,12 @@ export function HomeScreen() {
                               {task.title}
                             </Text>
                             <Text style={styles.reminderTaskMeta} numberOfLines={1} ellipsizeMode="tail">
-                              {`最高 ${task.maxPoints} 分 · 任务组 ${getGroupName(task.groupId)} · 目标日 ${
-                                task.targetDate === todayKey
-                                  ? "今天"
-                                  : task.targetDate === tomorrowKey
-                                    ? "明天"
-                                    : task.targetDate || "未设置"
-                              }`}
+                              {`最高 ${task.maxPoints} 分 · 任务组 ${getGroupName(task.groupId)} · 目标日 ${task.targetDate === todayKey
+                                ? "今天"
+                                : task.targetDate === tomorrowKey
+                                  ? "明天"
+                                  : task.targetDate || "未设置"
+                                }`}
                             </Text>
                           </View>
                         </Pressable>
@@ -3055,23 +3080,76 @@ export function HomeScreen() {
                     })
                   )}
                 </ScrollView>
-                <View style={styles.reminderTestRow}>
-                  {dailyReminderTaskPage === "periodic" ? (
-                    <Pressable
-                      onPress={() => handleTestReminderNotification("periodic")}
-                      style={pressable([styles.reminderTestButton])}
-                    >
-                      <Text style={styles.reminderTestButtonText}>测试周期任务</Text>
+
+                {dailyReminderTaskPage === "periodic" ? (
+                  <>
+                    <Text style={[styles.sectionMeta, !reminderEnabledDraft && styles.muted]}>周期任务提醒时间</Text>
+                    <View style={[styles.reminderTimeRow, !reminderEnabledDraft && styles.sectionDisabled]}>
+                      <TextInput
+                        value={periodicReminderHourDraft}
+                        onChangeText={setPeriodicReminderHourDraft}
+                        placeholder="时"
+                        placeholderTextColor={theme.colors.muted}
+                        keyboardType="number-pad"
+                        style={[styles.input, styles.inputSmall]}
+                      />
+                      <Text style={styles.sectionTitle}>:</Text>
+                      <TextInput
+                        value={periodicReminderMinuteDraft}
+                        onChangeText={setPeriodicReminderMinuteDraft}
+                        placeholder="分"
+                        placeholderTextColor={theme.colors.muted}
+                        keyboardType="number-pad"
+                        style={[styles.input, styles.inputSmall]}
+                      />
+                    </View>
+                    <View style={styles.reminderTestRow}>
+                      <Pressable
+                        onPress={() => handleTestReminderNotification("periodic")}
+                        style={pressable([styles.reminderTestButton])}
+                      >
+                        <Text style={styles.reminderTestButtonText}>测试周期任务</Text>
+                      </Pressable>
+                    </View>
+                    <Pressable onPress={handleSavePeriodicReminderSettings} style={pressable(styles.button)}>
+                      <Text style={styles.buttonText}>保存周期设置</Text>
                     </Pressable>
-                  ) : (
-                    <Pressable
-                      onPress={() => handleTestReminderNotification("single")}
-                      style={pressable([styles.reminderTestButton])}
-                    >
-                      <Text style={styles.reminderTestButtonText}>测试单次任务</Text>
+                  </>
+                ) : (
+                  <>
+                    <Text style={[styles.sectionMeta, !reminderEnabledDraft && styles.muted]}>单次任务提醒时间</Text>
+                    <View style={[styles.reminderTimeRow, !reminderEnabledDraft && styles.sectionDisabled]}>
+                      <TextInput
+                        value={singleReminderHourDraft}
+                        onChangeText={setSingleReminderHourDraft}
+                        placeholder="时"
+                        placeholderTextColor={theme.colors.muted}
+                        keyboardType="number-pad"
+                        style={[styles.input, styles.inputSmall]}
+                      />
+                      <Text style={styles.sectionTitle}>:</Text>
+                      <TextInput
+                        value={singleReminderMinuteDraft}
+                        onChangeText={setSingleReminderMinuteDraft}
+                        placeholder="分"
+                        placeholderTextColor={theme.colors.muted}
+                        keyboardType="number-pad"
+                        style={[styles.input, styles.inputSmall]}
+                      />
+                    </View>
+                    <View style={styles.reminderTestRow}>
+                      <Pressable
+                        onPress={() => handleTestReminderNotification("single")}
+                        style={pressable([styles.reminderTestButton])}
+                      >
+                        <Text style={styles.reminderTestButtonText}>测试单次任务</Text>
+                      </Pressable>
+                    </View>
+                    <Pressable onPress={handleSaveSingleReminderSettings} style={pressable(styles.button)}>
+                      <Text style={styles.buttonText}>保存单次设置</Text>
                     </Pressable>
-                  )}
-                </View>
+                  </>
+                )}
               </>
             ) : (
               <>
@@ -3174,11 +3252,11 @@ export function HomeScreen() {
                     })
                   )}
                 </ScrollView>
+                <Pressable onPress={handleSaveLongtermReminderSettings} style={pressable(styles.button)}>
+                  <Text style={styles.buttonText}>保存长期设置</Text>
+                </Pressable>
               </>
             )}
-            <Pressable onPress={handleSaveReminderSettings} style={pressable(styles.button)}>
-              <Text style={styles.buttonText}>保存设置</Text>
-            </Pressable>
           </View>
         </View>
       </Modal>
@@ -3558,7 +3636,7 @@ export function HomeScreen() {
           </View>
         </View>
       </Modal>
-    </SafeAreaView>
+    </SafeAreaView >
   );
 }
 
