@@ -20,6 +20,8 @@ import * as Notifications from "expo-notifications";
 import {
   DEFAULT_GROUP_ID,
   AutoRule,
+  LongtermReminderIntervalRule,
+  NotificationMode,
   NotificationDateMode,
   NotificationRepeatRule,
   PlanType,
@@ -53,7 +55,7 @@ const GROUP_COLORS = [
 const AUTO_RULE_OPTIONS: Array<{ value: AutoRule; label: string }> = [
   { value: "daily", label: "每日" },
   { value: "weekday", label: "工作日" },
-  { value: "monWedFri", label: "一三五" }
+  { value: "weekend", label: "周末" }
 ];
 
 const TASK_TYPE_OPTIONS: PlanType[] = ["daily", "longterm"];
@@ -61,16 +63,27 @@ const TASK_TYPE_LABELS: Record<PlanType, string> = {
   daily: "每日任务",
   longterm: "长期任务"
 };
-const REMINDER_REPEAT_OPTIONS: Array<{ value: NotificationRepeatRule; label: string }> = [
-  { value: "once", label: "单次" },
-  { value: "daily", label: "每天" },
-  { value: "weekday", label: "工作日" }
-];
 const REMINDER_DATE_OPTIONS: Array<{ value: NotificationDateMode; label: string }> = [
   { value: "today", label: "今天" },
   { value: "tomorrow", label: "明天" }
 ];
+const LONGTERM_INTERVAL_OPTIONS: Array<{ value: LongtermReminderIntervalRule; label: string }> = [
+  { value: "none", label: "关闭" },
+  { value: "weekly", label: "每周" },
+  { value: "every14Days", label: "14天" },
+  { value: "every30Days", label: "30天" }
+];
+const LONGTERM_DEADLINE_OFFSET_OPTIONS = [
+  { value: 7, label: "提前7天" },
+  { value: 3, label: "提前3天" },
+  { value: 1, label: "提前1天" },
+  { value: 0, label: "当天" }
+];
 const REMINDER_SCHEDULE_DAYS = 30;
+const LONGTERM_REMINDER_SCHEDULE_DAYS = 90;
+const TREND_DAYS_BEFORE_TODAY = 7;
+const TREND_DAYS_AFTER_TODAY = 7;
+const CALENDAR_HEAT_BASE_COLOR = "#2563EB";
 
 const GRID_SPACING = 24;
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
@@ -136,21 +149,48 @@ function buildReminderSyncFingerprint(
     enabled: boolean;
     hour: number;
     minute: number;
+    mode: NotificationMode;
     dateMode: NotificationDateMode;
     repeatRule: NotificationRepeatRule;
   },
-  tasks: Array<{ id: string; title: string }>
+  tasks: Array<{ id: string; title: string; autoRule?: AutoRule }>
 ): string {
   const taskPart = [...tasks]
     .sort((a, b) => a.id.localeCompare(b.id))
-    .map((task) => `${task.id}:${task.title}`)
+    .map((task) => `${task.id}:${task.title}:${task.autoRule ?? ""}`)
     .join("|");
   return [
     settings.enabled ? "1" : "0",
     String(settings.hour),
     String(settings.minute),
+    settings.mode,
     settings.dateMode,
     settings.repeatRule,
+    taskPart
+  ].join("~");
+}
+
+function buildLongtermReminderSyncFingerprint(
+  settings: {
+    enabled: boolean;
+    hour: number;
+    minute: number;
+    deadlineOffsets: number[];
+    intervalRule: LongtermReminderIntervalRule;
+  },
+  tasks: Array<{ id: string; title: string; deadlineDate: string }>
+): string {
+  const taskPart = [...tasks]
+    .sort((a, b) => a.id.localeCompare(b.id))
+    .map((task) => `${task.id}:${task.deadlineDate}:${task.title}`)
+    .join("|");
+  const offsetPart = [...settings.deadlineOffsets].sort((a, b) => b - a).join(",");
+  return [
+    settings.enabled ? "1" : "0",
+    String(settings.hour),
+    String(settings.minute),
+    offsetPart,
+    settings.intervalRule,
     taskPart
   ].join("~");
 }
@@ -200,6 +240,43 @@ function dateModeLabel(mode: NotificationDateMode): string {
   return mode === "today" ? "今天" : "明天";
 }
 
+function longtermIntervalLabel(rule: LongtermReminderIntervalRule): string {
+  if (rule === "weekly") return "每周";
+  if (rule === "every14Days") return "每14天";
+  if (rule === "every30Days") return "每30天";
+  return "关闭";
+}
+
+function daysBetween(startDate: Date, endDate: Date): number {
+  const start = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate());
+  const end = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate());
+  const ms = end.getTime() - start.getTime();
+  return Math.floor(ms / (24 * 60 * 60 * 1000));
+}
+
+function buildLongtermReminderDates(
+  hour: number,
+  minute: number,
+  days: number,
+  intervalRule: LongtermReminderIntervalRule
+): Date[] {
+  if (intervalRule === "none") return [];
+  const step = intervalRule === "weekly" ? 7 : intervalRule === "every14Days" ? 14 : 30;
+  const maxDays = Math.max(1, days);
+  const now = new Date();
+  const first = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, minute, 0, 0);
+  if (first.getTime() <= now.getTime()) {
+    first.setDate(first.getDate() + 1);
+  }
+  const dates: Date[] = [];
+  for (let offset = 0; offset < maxDays; offset += step) {
+    const date = new Date(first);
+    date.setDate(first.getDate() + offset);
+    dates.push(date);
+  }
+  return dates;
+}
+
 type DeadlinePickerTarget = { kind: "create" } | { kind: "task"; taskId: string };
 const WHEEL_ITEM_HEIGHT = 36;
 const WHEEL_VISIBLE_ROWS = 5;
@@ -220,6 +297,8 @@ export function HomeScreen() {
   const [noticeText, setNoticeText] = useState<string | null>(null);
   const noticeAnim = React.useRef(new Animated.Value(0)).current;
   const noticeTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fabDockTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fabDockAnim = React.useRef(new Animated.Value(1)).current;
   const [isDeadlinePickerOpen, setIsDeadlinePickerOpen] = useState(false);
   const [deadlinePickerTarget, setDeadlinePickerTarget] = useState<DeadlinePickerTarget | null>(null);
   const [deadlinePickerYear, setDeadlinePickerYear] = useState(new Date().getFullYear());
@@ -237,16 +316,25 @@ export function HomeScreen() {
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
   const [activeChart, setActiveChart] = useState<"line" | "calendar">("line");
   const [isTemplatePickerOpen, setIsTemplatePickerOpen] = useState(false);
+  const [isFabDocked, setIsFabDocked] = useState(true);
   const [templateTab, setTemplateTab] = useState<PlanType>("daily");
   const [isArchiveOpen, setIsArchiveOpen] = useState(false);
   const [archiveDaysDraft, setArchiveDaysDraft] = useState("30");
   const [isReminderOpen, setIsReminderOpen] = useState(false);
+  const [reminderPanel, setReminderPanel] = useState<"daily" | "longterm">("daily");
+  const [dailyReminderTaskPage, setDailyReminderTaskPage] = useState<"periodic" | "single">("periodic");
   const [reminderEnabledDraft, setReminderEnabledDraft] = useState(true);
   const [reminderHourDraft, setReminderHourDraft] = useState("08");
   const [reminderMinuteDraft, setReminderMinuteDraft] = useState("00");
   const [reminderTaskIdsDraft, setReminderTaskIdsDraft] = useState<string[]>([]);
-  const [reminderRepeatDraft, setReminderRepeatDraft] = useState<NotificationRepeatRule>("daily");
   const [reminderDateModeDraft, setReminderDateModeDraft] = useState<NotificationDateMode>("tomorrow");
+  const [longtermReminderEnabledDraft, setLongtermReminderEnabledDraft] = useState(false);
+  const [longtermReminderHourDraft, setLongtermReminderHourDraft] = useState("20");
+  const [longtermReminderMinuteDraft, setLongtermReminderMinuteDraft] = useState("00");
+  const [longtermReminderTaskIdsDraft, setLongtermReminderTaskIdsDraft] = useState<string[]>([]);
+  const [longtermReminderOffsetsDraft, setLongtermReminderOffsetsDraft] = useState<number[]>([7, 3, 1, 0]);
+  const [longtermReminderIntervalDraft, setLongtermReminderIntervalDraft] =
+    useState<LongtermReminderIntervalRule>("weekly");
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [isDayDetailOpen, setIsDayDetailOpen] = useState(false);
   const [selectedDateKey, setSelectedDateKey] = useState<string | null>(null);
@@ -255,6 +343,8 @@ export function HomeScreen() {
   const [rewardBurst, setRewardBurst] = useState<number | null>(null);
   const reminderSyncRunRef = React.useRef(0);
   const lastReminderSyncFingerprintRef = React.useRef<string | null>(null);
+  const longtermReminderSyncRunRef = React.useRef(0);
+  const lastLongtermReminderSyncFingerprintRef = React.useRef<string | null>(null);
   const appStateRef = React.useRef(AppState.currentState);
   const lastReminderResyncDateRef = React.useRef(formatLocalDate(new Date()));
   const [confirmState, setConfirmState] = useState<{
@@ -303,10 +393,11 @@ export function HomeScreen() {
       hour: number;
       minute: number;
       taskIds: string[];
+      mode: NotificationMode;
       dateMode: NotificationDateMode;
       repeatRule: NotificationRepeatRule;
     },
-    reminderTasks: Array<{ id: string; title: string }>,
+    reminderTasks: Array<{ id: string; title: string; autoRule?: AutoRule }>,
     scheduleFingerprint: string,
     showResultNotice = false,
     forceSync = false
@@ -341,34 +432,94 @@ export function HomeScreen() {
         return;
       }
 
-      const selectedTaskIds = reminderTasks.map((task) => task.id);
-      const message = buildReminderMessage(reminderTasks);
-      if (settings.repeatRule === "once") {
+      const periodicTasks = reminderTasks.filter((task) => typeof task.autoRule === "string");
+      const singleTasks = reminderTasks.filter((task) => typeof task.autoRule !== "string");
+      let scheduledCount = 0;
+      if (singleTasks.length > 0) {
+        const singleTargetDate = buildOnceReminderDate(settings.dateMode, settings.hour, settings.minute);
+        if (singleTargetDate.getTime() > Date.now()) {
+          const singleMessage = buildReminderMessage(singleTasks);
+          await Notifications.scheduleNotificationAsync({
+            content: {
+              title: singleMessage.title,
+              body: singleMessage.body,
+              data: {
+                type: "task_reminder",
+                taskIds: singleTasks.map((task) => task.id),
+                dateMode: settings.dateMode,
+                repeatRule: "single_once"
+              }
+            },
+            trigger: {
+              channelId: Platform.OS === "android" ? "task-list" : undefined,
+              date: singleTargetDate
+            }
+          });
+          scheduledCount += 1;
+        }
+      }
+      const periodicMessage = buildReminderMessage(periodicTasks);
+      if (periodicTasks.length > 0 && settings.mode === "follow_task") {
+        const upcomingDates = buildUpcomingReminderDates(
+          settings.hour,
+          settings.minute,
+          REMINDER_SCHEDULE_DAYS,
+          "daily"
+        );
+        await Promise.all(
+          upcomingDates.map((date, index) => {
+            const tasksForDate = periodicTasks.filter((task) => isRuleMatch(task.autoRule, date));
+            if (tasksForDate.length === 0) return Promise.resolve();
+            const message = buildReminderMessage(tasksForDate);
+            scheduledCount += 1;
+            return Notifications.scheduleNotificationAsync({
+              content: {
+                title: message.title,
+                body: message.body,
+                data: {
+                  type: "task_reminder",
+                  taskIds: tasksForDate.map((task) => task.id),
+                  dayOffset: index,
+                  repeatRule: "follow_task"
+                }
+              },
+              trigger: {
+                channelId: Platform.OS === "android" ? "task-list" : undefined,
+                date
+              }
+            });
+          })
+        );
+      } else if (periodicTasks.length > 0 && settings.repeatRule === "once") {
         const targetDate = buildOnceReminderDate(settings.dateMode, settings.hour, settings.minute);
         if (targetDate.getTime() <= Date.now()) {
-          lastReminderSyncFingerprintRef.current = scheduleFingerprint;
-          if (showResultNotice) {
-            Alert.alert("时间已过", "单次提醒请设置为未来时间");
-          }
-          return;
-        }
-        await Notifications.scheduleNotificationAsync({
-          content: {
-            title: message.title,
-            body: message.body,
-            data: {
-              type: "task_reminder",
-              taskIds: selectedTaskIds,
-              repeatRule: settings.repeatRule,
-              dateMode: settings.dateMode
+          if (singleTasks.length === 0) {
+            lastReminderSyncFingerprintRef.current = scheduleFingerprint;
+            if (showResultNotice) {
+              Alert.alert("时间已过", "单次提醒请设置为未来时间");
             }
-          },
-          trigger: {
-            channelId: Platform.OS === "android" ? "task-list" : undefined,
-            date: targetDate
+            return;
           }
-        });
-      } else {
+        } else {
+          scheduledCount += 1;
+          await Notifications.scheduleNotificationAsync({
+            content: {
+              title: periodicMessage.title,
+              body: periodicMessage.body,
+              data: {
+                type: "task_reminder",
+                taskIds: periodicTasks.map((task) => task.id),
+                repeatRule: settings.repeatRule,
+                dateMode: settings.dateMode
+              }
+            },
+            trigger: {
+              channelId: Platform.OS === "android" ? "task-list" : undefined,
+              date: targetDate
+            }
+          });
+        }
+      } else if (periodicTasks.length > 0) {
         const upcomingDates = buildUpcomingReminderDates(
           settings.hour,
           settings.minute,
@@ -377,33 +528,45 @@ export function HomeScreen() {
         );
         await Promise.all(
           upcomingDates.map((date, index) =>
-            Notifications.scheduleNotificationAsync({
-              content: {
-                title: message.title,
-                body: message.body,
-                data: {
-                  type: "task_reminder",
-                  taskIds: selectedTaskIds,
-                  dayOffset: index,
-                  repeatRule: settings.repeatRule
+            (() => {
+              scheduledCount += 1;
+              return Notifications.scheduleNotificationAsync({
+                content: {
+                  title: periodicMessage.title,
+                  body: periodicMessage.body,
+                  data: {
+                    type: "task_reminder",
+                    taskIds: periodicTasks.map((task) => task.id),
+                    dayOffset: index,
+                    repeatRule: settings.repeatRule
+                  }
+                },
+                trigger: {
+                  channelId: Platform.OS === "android" ? "task-list" : undefined,
+                  date
                 }
-              },
-              trigger: {
-                channelId: Platform.OS === "android" ? "task-list" : undefined,
-                date
-              }
-            })
+              });
+            })()
           )
         );
+      }
+      if (scheduledCount === 0) {
+        lastReminderSyncFingerprintRef.current = scheduleFingerprint;
+        if (showResultNotice) {
+          Alert.alert("未创建提醒", "当前提醒时间已过或无匹配任务，请调整后重试");
+        }
+        return;
       }
       if (runId !== reminderSyncRunRef.current) return;
       lastReminderSyncFingerprintRef.current = scheduleFingerprint;
 
-      if (showResultNotice) {
-        const modeText =
-          settings.repeatRule === "once"
-            ? `${dateModeLabel(settings.dateMode)} ${pad2(settings.hour)}:${pad2(settings.minute)}`
-            : `${repeatRuleLabel(settings.repeatRule)} ${pad2(settings.hour)}:${pad2(settings.minute)}`;
+        if (showResultNotice) {
+          const modeText =
+            settings.mode === "follow_task"
+              ? `跟随任务周期 ${pad2(settings.hour)}:${pad2(settings.minute)}`
+              : settings.repeatRule === "once"
+                ? `${dateModeLabel(settings.dateMode)} ${pad2(settings.hour)}:${pad2(settings.minute)}`
+                : `${repeatRuleLabel(settings.repeatRule)} ${pad2(settings.hour)}:${pad2(settings.minute)}`;
         showShortNotice(`提醒已设置 ${modeText}`);
       }
     } catch (error) {
@@ -413,15 +576,182 @@ export function HomeScreen() {
     }
   }
 
-  async function handleTestReminderNotification() {
-    const ready = await ensureNotificationPermissionAndChannel(true);
+  async function syncLongtermReminderSchedule(
+    settings: {
+      enabled: boolean;
+      hour: number;
+      minute: number;
+      taskIds: string[];
+      deadlineOffsets: number[];
+      intervalRule: LongtermReminderIntervalRule;
+    },
+    reminderTasks: Array<{ id: string; title: string; deadlineDate: string }>,
+    scheduleFingerprint: string,
+    showResultNotice = false,
+    forceSync = false
+  ): Promise<void> {
+    if (!forceSync && lastLongtermReminderSyncFingerprintRef.current === scheduleFingerprint) {
+      return;
+    }
+    const runId = ++longtermReminderSyncRunRef.current;
+    const ready = await ensureNotificationPermissionAndChannel(showResultNotice);
     if (!ready) return;
     try {
+      if (runId !== longtermReminderSyncRunRef.current) return;
+      const existing = await Notifications.getAllScheduledNotificationsAsync();
+      await Promise.all(
+        existing
+          .filter((item) => item.content?.data?.type === "longterm_task_reminder")
+          .map((item) => Notifications.cancelScheduledNotificationAsync(item.identifier))
+      );
+      if (runId !== longtermReminderSyncRunRef.current) return;
+
+      if (!settings.enabled) {
+        lastLongtermReminderSyncFingerprintRef.current = scheduleFingerprint;
+        if (showResultNotice) showShortNotice("长期提醒已关闭");
+        return;
+      }
+
+      if (reminderTasks.length === 0) {
+        lastLongtermReminderSyncFingerprintRef.current = scheduleFingerprint;
+        if (showResultNotice) {
+          Alert.alert("未设置长期提醒任务", "请至少勾选 1 个带截止日期的长期任务");
+        }
+        return;
+      }
+
+      const now = new Date();
+      const selectedTaskIds = reminderTasks.map((task) => task.id);
+      const seenTriggerKeys = new Set<string>();
+      const scheduleEntries: Array<{
+        taskId: string;
+        taskTitle: string;
+        date: Date;
+        reason: string;
+      }> = [];
+
+      for (const task of reminderTasks) {
+        const deadlineDate = parseDateKey(task.deadlineDate);
+        if (deadlineDate) {
+          for (const offset of settings.deadlineOffsets) {
+            const triggerDate = new Date(
+              deadlineDate.getFullYear(),
+              deadlineDate.getMonth(),
+              deadlineDate.getDate() - offset,
+              settings.hour,
+              settings.minute,
+              0,
+              0
+            );
+            if (triggerDate.getTime() <= now.getTime()) continue;
+            if (daysBetween(now, triggerDate) > LONGTERM_REMINDER_SCHEDULE_DAYS) continue;
+            const key = `${task.id}|deadline|${formatLocalDate(triggerDate)}|${settings.hour}|${settings.minute}`;
+            if (seenTriggerKeys.has(key)) continue;
+            seenTriggerKeys.add(key);
+            scheduleEntries.push({
+              taskId: task.id,
+              taskTitle: task.title,
+              date: triggerDate,
+              reason: offset === 0 ? "截止日当天" : `距截止 ${offset} 天`
+            });
+          }
+        }
+      }
+
+      const intervalDates = buildLongtermReminderDates(
+        settings.hour,
+        settings.minute,
+        LONGTERM_REMINDER_SCHEDULE_DAYS,
+        settings.intervalRule
+      );
+      if (settings.intervalRule !== "none") {
+        for (const date of intervalDates) {
+          const key = `interval|${formatLocalDate(date)}|${settings.hour}|${settings.minute}`;
+          if (seenTriggerKeys.has(key)) continue;
+          seenTriggerKeys.add(key);
+          scheduleEntries.push({
+            taskId: "all",
+            taskTitle: "长期任务",
+            date,
+            reason: `${longtermIntervalLabel(settings.intervalRule)}回顾`
+          });
+        }
+      }
+
+      await Promise.all(
+        scheduleEntries.map((entry) =>
+          Notifications.scheduleNotificationAsync({
+            content: {
+              title: "长期任务提醒",
+              body:
+                entry.taskId === "all"
+                  ? `请回顾长期任务进度（共 ${reminderTasks.length} 项）`
+                  : `「${entry.taskTitle}」${entry.reason}`,
+              data: {
+                type: "longterm_task_reminder",
+                taskIds: selectedTaskIds,
+                taskId: entry.taskId,
+                reason: entry.reason
+              }
+            },
+            trigger: {
+              channelId: Platform.OS === "android" ? "task-list" : undefined,
+              date: entry.date
+            }
+          })
+        )
+      );
+
+      if (runId !== longtermReminderSyncRunRef.current) return;
+      lastLongtermReminderSyncFingerprintRef.current = scheduleFingerprint;
+
+      if (showResultNotice) {
+        showShortNotice(`长期提醒已设置 ${scheduleEntries.length} 条`);
+      }
+    } catch (error) {
+      if (showResultNotice) {
+        Alert.alert("长期提醒设置失败", "未能成功创建长期提醒，请稍后重试");
+      }
+    }
+  }
+
+  async function handleTestReminderNotification(kind: "periodic" | "single") {
+    const ready = await ensureNotificationPermissionAndChannel(true);
+    if (!ready) return;
+    const selectedPeriodicGroups =
+      kind === "periodic"
+        ? periodicReminderDisplayOptions.filter((item) =>
+            item.taskIds.every((taskId) => reminderTaskIdsDraft.includes(taskId))
+          )
+        : [];
+    const selectedSingleTasks =
+      kind === "single" ? singleReminderTaskOptions.filter((task) => reminderTaskIdsDraft.includes(task.id)) : [];
+    const selectedTaskIds =
+      kind === "periodic"
+        ? Array.from(new Set(selectedPeriodicGroups.flatMap((item) => item.taskIds)))
+        : selectedSingleTasks.map((task) => task.id);
+    const messageTasks =
+      kind === "periodic"
+        ? selectedPeriodicGroups.map((item) => ({ title: item.title }))
+        : selectedSingleTasks.map((task) => ({ title: task.title }));
+    if (messageTasks.length === 0) {
+      Alert.alert(
+        "未选择任务",
+        kind === "periodic" ? "请至少勾选 1 个周期任务后再测试" : "请至少勾选 1 个单次任务后再测试"
+      );
+      return;
+    }
+    try {
+      const message = buildReminderMessage(messageTasks);
       await Notifications.scheduleNotificationAsync({
         content: {
-          title: "任务提醒测试",
-          body: "如果你看到了这条通知，说明提醒功能工作正常",
-          data: { type: "task_reminder_test" }
+          title: kind === "periodic" ? "周期任务提醒测试" : "单次任务提醒测试",
+          body: message.body,
+          data: {
+            type: "task_reminder_test",
+            kind,
+            taskIds: selectedTaskIds
+          }
         },
         trigger: {
           channelId: Platform.OS === "android" ? "task-list" : undefined,
@@ -429,7 +759,7 @@ export function HomeScreen() {
           repeats: false
         }
       });
-      showShortNotice("测试通知将在 5 秒后触发");
+      showShortNotice(`${kind === "periodic" ? "周期任务" : "单次任务"}测试通知将在 5 秒后触发`);
     } catch (error) {
       Alert.alert("测试失败", "无法创建测试通知，请稍后重试");
     }
@@ -452,8 +782,19 @@ export function HomeScreen() {
       if (noticeTimerRef.current) {
         clearTimeout(noticeTimerRef.current);
       }
+      if (fabDockTimerRef.current) {
+        clearTimeout(fabDockTimerRef.current);
+      }
     };
   }, []);
+
+  useEffect(() => {
+    Animated.timing(fabDockAnim, {
+      toValue: isFabDocked ? 1 : 0,
+      duration: 220,
+      useNativeDriver: true
+    }).start();
+  }, [isFabDocked, fabDockAnim]);
 
   useEffect(() => {
     if (!isReady) return;
@@ -550,11 +891,22 @@ export function HomeScreen() {
     hour: 8,
     minute: 0,
     taskIds: [],
+    mode: "global_rule" as NotificationMode,
     dateMode: "tomorrow" as NotificationDateMode,
     repeatRule: "daily" as NotificationRepeatRule
   };
+  const longtermNotificationSettings = state.longtermNotificationSettings ?? {
+    enabled: false,
+    hour: 20,
+    minute: 0,
+    taskIds: [],
+    deadlineOffsets: [7, 3, 1, 0],
+    intervalRule: "weekly" as LongtermReminderIntervalRule
+  };
   const reminderSummary =
-    notificationSettings.repeatRule === "once"
+    notificationSettings.mode === "follow_task"
+      ? `跟随任务周期 ${pad2(notificationSettings.hour)}:${pad2(notificationSettings.minute)}`
+      : notificationSettings.repeatRule === "once"
       ? `单次 ${dateModeLabel(notificationSettings.dateMode)} ${pad2(notificationSettings.hour)}:${pad2(
           notificationSettings.minute
         )}`
@@ -570,15 +922,154 @@ export function HomeScreen() {
         title: task.title,
         planType: task.planType,
         groupId: task.groupId,
-        maxPoints: task.maxPoints
+        maxPoints: task.maxPoints,
+        targetDate: task.targetDate ?? "",
+        sourceTemplateId: task.sourceTemplateId,
+        autoRule: task.sourceTemplateId
+          ? state.templates.find((item) => item.id === task.sourceTemplateId)?.autoRule
+          : undefined
       }));
-  }, [dailyTasks]);
+  }, [dailyTasks, state.templates]);
+  const periodicReminderTaskOptions = useMemo(
+    () => reminderTaskOptions.filter((task) => typeof task.autoRule === "string"),
+    [reminderTaskOptions]
+  );
+  const periodicReminderDisplayOptions = useMemo(() => {
+    const merged = new Map<
+      string,
+      {
+        key: string;
+        title: string;
+        groupId: string;
+        maxPoints: number;
+        autoRule?: AutoRule;
+        taskIds: string[];
+      }
+    >();
+    periodicReminderTaskOptions.forEach((task) => {
+      const key = task.sourceTemplateId ?? `${task.groupId}|${task.title}|${task.maxPoints}|${task.autoRule ?? ""}`;
+      const existing = merged.get(key);
+      if (existing) {
+        if (!existing.taskIds.includes(task.id)) {
+          existing.taskIds.push(task.id);
+        }
+        return;
+      }
+      merged.set(key, {
+        key,
+        title: task.title,
+        groupId: task.groupId,
+        maxPoints: task.maxPoints,
+        autoRule: task.autoRule,
+        taskIds: [task.id]
+      });
+    });
+    return Array.from(merged.values());
+  }, [periodicReminderTaskOptions]);
+  const singleReminderTaskOptions = useMemo(() => {
+    const targetKey = reminderDateModeDraft === "today" ? todayKey : tomorrowKey;
+    return reminderTaskOptions.filter(
+      (task) => typeof task.autoRule !== "string" && task.targetDate === targetKey
+    );
+  }, [reminderTaskOptions, reminderDateModeDraft, todayKey, tomorrowKey]);
+  const reminderTaskOptionIdSet = useMemo(
+    () => new Set([...periodicReminderTaskOptions, ...singleReminderTaskOptions].map((task) => task.id)),
+    [periodicReminderTaskOptions, singleReminderTaskOptions]
+  );
+  const hasPeriodicReminderTasks = useMemo(
+    () => periodicReminderTaskOptions.length > 0,
+    [periodicReminderTaskOptions]
+  );
+  useEffect(() => {
+    setReminderTaskIdsDraft((prev) => prev.filter((taskId) => reminderTaskOptionIdSet.has(taskId)));
+  }, [reminderTaskOptionIdSet]);
+  useEffect(() => {
+    if (hasPeriodicReminderTasks) return;
+    setDailyReminderTaskPage("single");
+  }, [hasPeriodicReminderTasks]);
   const reminderTasksForSchedule = useMemo(() => {
     const idSet = new Set(notificationSettings.taskIds);
     return dailyTasks
       .filter((task) => idSet.has(task.id))
-      .map((task) => ({ id: task.id, title: task.title }));
-  }, [dailyTasks, notificationSettings.taskIds]);
+      .map((task) => ({
+        id: task.id,
+        title: task.title,
+        autoRule: task.sourceTemplateId
+          ? state.templates.find((item) => item.id === task.sourceTemplateId)?.autoRule
+          : undefined
+      }));
+  }, [dailyTasks, notificationSettings.taskIds, state.templates]);
+  const longtermTaskIdSet = useMemo(
+    () =>
+      new Set(
+        longtermTasks
+          .filter((task) => typeof task.deadlineDate === "string" && task.deadlineDate.trim().length > 0)
+          .map((task) => task.id)
+      ),
+    [longtermTasks]
+  );
+  const longtermReminderTaskOptions = useMemo(() => {
+    return longtermTasks
+      .filter((task) => typeof task.deadlineDate === "string" && task.deadlineDate.trim().length > 0)
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map((task) => ({
+        id: task.id,
+        title: task.title,
+        groupId: task.groupId,
+        deadlineDate: task.deadlineDate ?? ""
+      }));
+  }, [longtermTasks]);
+  const longtermReminderTaskOptionIdSet = useMemo(
+    () => new Set(longtermReminderTaskOptions.map((task) => task.id)),
+    [longtermReminderTaskOptions]
+  );
+  useEffect(() => {
+    setLongtermReminderTaskIdsDraft((prev) => prev.filter((taskId) => longtermReminderTaskOptionIdSet.has(taskId)));
+  }, [longtermReminderTaskOptionIdSet]);
+  const longtermReminderTasksForSchedule = useMemo(() => {
+    const idSet = new Set(longtermNotificationSettings.taskIds);
+    return longtermReminderTaskOptions
+      .filter((task) => idSet.has(task.id))
+      .map((task) => ({ id: task.id, title: task.title, deadlineDate: task.deadlineDate }));
+  }, [longtermReminderTaskOptions, longtermNotificationSettings.taskIds]);
+  const longtermReminderSummary = useMemo(() => {
+    const offsetText = longtermNotificationSettings.deadlineOffsets.length
+      ? longtermNotificationSettings.deadlineOffsets
+          .slice()
+          .sort((a, b) => b - a)
+          .map((offset) => (offset === 0 ? "当天" : `提前${offset}天`))
+          .join("/")
+      : "无";
+    return `${pad2(longtermNotificationSettings.hour)}:${pad2(longtermNotificationSettings.minute)} · 截止提醒 ${offsetText} · 周期 ${longtermIntervalLabel(
+      longtermNotificationSettings.intervalRule
+    )}`;
+  }, [
+    longtermNotificationSettings.hour,
+    longtermNotificationSettings.minute,
+    longtermNotificationSettings.deadlineOffsets,
+    longtermNotificationSettings.intervalRule
+  ]);
+  const longtermReminderSyncFingerprint = useMemo(
+    () =>
+      buildLongtermReminderSyncFingerprint(
+        {
+          enabled: longtermNotificationSettings.enabled,
+          hour: longtermNotificationSettings.hour,
+          minute: longtermNotificationSettings.minute,
+          deadlineOffsets: longtermNotificationSettings.deadlineOffsets,
+          intervalRule: longtermNotificationSettings.intervalRule
+        },
+        longtermReminderTasksForSchedule
+      ),
+    [
+      longtermNotificationSettings.enabled,
+      longtermNotificationSettings.hour,
+      longtermNotificationSettings.minute,
+      longtermNotificationSettings.deadlineOffsets,
+      longtermNotificationSettings.intervalRule,
+      longtermReminderTasksForSchedule
+    ]
+  );
   const reminderSyncFingerprint = useMemo(
     () =>
       buildReminderSyncFingerprint(
@@ -586,6 +1077,7 @@ export function HomeScreen() {
           enabled: notificationSettings.enabled,
           hour: notificationSettings.hour,
           minute: notificationSettings.minute,
+          mode: notificationSettings.mode,
           dateMode: notificationSettings.dateMode,
           repeatRule: notificationSettings.repeatRule
         },
@@ -595,6 +1087,7 @@ export function HomeScreen() {
       notificationSettings.enabled,
       notificationSettings.hour,
       notificationSettings.minute,
+      notificationSettings.mode,
       notificationSettings.dateMode,
       notificationSettings.repeatRule,
       reminderTasksForSchedule
@@ -667,6 +1160,7 @@ export function HomeScreen() {
         hour: notificationSettings.hour,
         minute: notificationSettings.minute,
         taskIds: notificationSettings.taskIds,
+        mode: notificationSettings.mode,
         dateMode: notificationSettings.dateMode,
         repeatRule: notificationSettings.repeatRule
       },
@@ -675,6 +1169,23 @@ export function HomeScreen() {
       false
     );
   }, [isReady, reminderTasksForSchedule, reminderSyncFingerprint]);
+
+  useEffect(() => {
+    if (!isReady) return;
+    syncLongtermReminderSchedule(
+      {
+        enabled: longtermNotificationSettings.enabled,
+        hour: longtermNotificationSettings.hour,
+        minute: longtermNotificationSettings.minute,
+        taskIds: longtermNotificationSettings.taskIds,
+        deadlineOffsets: longtermNotificationSettings.deadlineOffsets,
+        intervalRule: longtermNotificationSettings.intervalRule
+      },
+      longtermReminderTasksForSchedule,
+      longtermReminderSyncFingerprint,
+      false
+    );
+  }, [isReady, longtermReminderTasksForSchedule, longtermReminderSyncFingerprint]);
 
   useEffect(() => {
     if (!isReady) return;
@@ -691,11 +1202,26 @@ export function HomeScreen() {
           hour: notificationSettings.hour,
           minute: notificationSettings.minute,
           taskIds: notificationSettings.taskIds,
+          mode: notificationSettings.mode,
           dateMode: notificationSettings.dateMode,
           repeatRule: notificationSettings.repeatRule
         },
         reminderTasksForSchedule,
         reminderSyncFingerprint,
+        false,
+        dayChanged
+      );
+      syncLongtermReminderSchedule(
+        {
+          enabled: longtermNotificationSettings.enabled,
+          hour: longtermNotificationSettings.hour,
+          minute: longtermNotificationSettings.minute,
+          taskIds: longtermNotificationSettings.taskIds,
+          deadlineOffsets: longtermNotificationSettings.deadlineOffsets,
+          intervalRule: longtermNotificationSettings.intervalRule
+        },
+        longtermReminderTasksForSchedule,
+        longtermReminderSyncFingerprint,
         false,
         dayChanged
       );
@@ -709,10 +1235,19 @@ export function HomeScreen() {
     notificationSettings.hour,
     notificationSettings.minute,
     notificationSettings.taskIds,
+    notificationSettings.mode,
     notificationSettings.dateMode,
     notificationSettings.repeatRule,
     reminderTasksForSchedule,
-    reminderSyncFingerprint
+    reminderSyncFingerprint,
+    longtermNotificationSettings.enabled,
+    longtermNotificationSettings.hour,
+    longtermNotificationSettings.minute,
+    longtermNotificationSettings.taskIds,
+    longtermNotificationSettings.deadlineOffsets,
+    longtermNotificationSettings.intervalRule,
+    longtermReminderTasksForSchedule,
+    longtermReminderSyncFingerprint
   ]);
 
   useEffect(() => {
@@ -721,35 +1256,50 @@ export function HomeScreen() {
       (item) => item.planType === "daily" && item.autoDaily
     );
     if (autoTemplates.length === 0) return;
-    const tomorrowDate = addDays(new Date(), 1);
-    const toAdd = autoTemplates.filter((template) => {
-      if (!isRuleMatch(template.autoRule, tomorrowDate)) return false;
-      return !state.tasks.some(
-        (task) =>
-          task.planType === "daily" &&
-          task.targetDate === tomorrowKey &&
-          task.groupId === template.groupId &&
-          task.title === template.title &&
-          task.maxPoints === template.maxPoints
-      );
+    const generationTargets = [
+      { date: new Date(), targetDate: todayKey },
+      { date: addDays(new Date(), 1), targetDate: tomorrowKey }
+    ];
+    const tasksToAdd: Task[] = [];
+    generationTargets.forEach(({ date, targetDate }) => {
+      autoTemplates.forEach((template) => {
+        if (!isRuleMatch(template.autoRule, date)) return;
+        const existsInState = state.tasks.some(
+          (task) =>
+            task.planType === "daily" &&
+            task.targetDate === targetDate &&
+            task.groupId === template.groupId &&
+            task.title === template.title &&
+            task.maxPoints === template.maxPoints
+        );
+        if (existsInState) return;
+        const existsInBatch = tasksToAdd.some(
+          (task) =>
+            task.targetDate === targetDate &&
+            task.groupId === template.groupId &&
+            task.title === template.title &&
+            task.maxPoints === template.maxPoints
+        );
+        if (existsInBatch) return;
+        tasksToAdd.push({
+          id: makeId("task"),
+          title: template.title,
+          groupId: template.groupId,
+          planType: "daily",
+          sourceTemplateId: template.id,
+          maxPoints: template.maxPoints,
+          earnedPoints: null,
+          completed: false,
+          targetDate,
+          createdAt: Date.now()
+        });
+      });
     });
-    if (toAdd.length === 0) return;
-    toAdd.forEach((template) => {
-      const task: Task = {
-        id: makeId("task"),
-        title: template.title,
-        groupId: template.groupId,
-        planType: "daily",
-        sourceTemplateId: template.id,
-        maxPoints: template.maxPoints,
-        earnedPoints: null,
-        completed: false,
-        targetDate: tomorrowKey,
-        createdAt: Date.now()
-      };
+    if (tasksToAdd.length === 0) return;
+    tasksToAdd.forEach((task) => {
       dispatch({ type: "ADD_TASK", task });
     });
-  }, [isReady, state.templates, state.tasks, tomorrowKey, dispatch]);
+  }, [isReady, state.templates, state.tasks, todayKey, tomorrowKey, dispatch]);
 
   const orderedLongtermTasks = useMemo(() => {
     return [...longtermTasks].sort((a, b) => {
@@ -816,14 +1366,15 @@ export function HomeScreen() {
   }, [dailyTasks, longtermTasks]);
 
   const recentDates = useMemo(() => {
-    const days = 14;
     const list: string[] = [];
     const base = new Date();
-    for (let i = days - 1; i >= 0; i -= 1) {
-      list.push(formatLocalDate(addDays(base, -i)));
+    for (let offset = -TREND_DAYS_BEFORE_TODAY; offset <= TREND_DAYS_AFTER_TODAY; offset += 1) {
+      list.push(formatLocalDate(addDays(base, offset)));
     }
     return list;
   }, [todayKey]);
+
+  const todayTrendIndex = Math.floor(recentDates.length / 2);
 
   const recentScores = useMemo(
     () => recentDates.map((dateKey) => dailyScoreMap[dateKey] ?? 0),
@@ -861,11 +1412,7 @@ export function HomeScreen() {
         });
       }
     }
-    const positiveScores = cells
-      .filter((cell) => cell.isCurrentMonth && cell.score > 0)
-      .map((cell) => cell.score);
-    const maxScore = positiveScores.length > 0 ? Math.max(...positiveScores) : 0;
-    return { cells, monthLabel: `${year}-${String(month + 1).padStart(2, "0")}`, maxScore };
+    return { cells, monthLabel: `${year}-${String(month + 1).padStart(2, "0")}` };
   }, [dailyScoreMap]);
 
   function getAutoRuleLabel(rule?: AutoRule): string {
@@ -885,8 +1432,8 @@ export function HomeScreen() {
     switch (rule) {
       case "weekday":
         return day >= 1 && day <= 5;
-      case "monWedFri":
-        return day === 1 || day === 3 || day === 5;
+      case "weekend":
+        return day === 0 || day === 6;
       case "daily":
       default:
         return true;
@@ -933,6 +1480,35 @@ export function HomeScreen() {
         useNativeDriver: true
       }).start(() => setNoticeText(null));
     }, 1200);
+  }
+
+  function scheduleFabDock(delayMs = 2600) {
+    if (fabDockTimerRef.current) {
+      clearTimeout(fabDockTimerRef.current);
+    }
+    fabDockTimerRef.current = setTimeout(() => {
+      setIsFabDocked(true);
+    }, delayMs);
+  }
+
+  function openTemplatePicker() {
+    if (fabDockTimerRef.current) {
+      clearTimeout(fabDockTimerRef.current);
+    }
+    setIsFabDocked(false);
+    setIsTemplatePickerOpen(true);
+  }
+
+  function closeTemplatePicker() {
+    if (fabDockTimerRef.current) {
+      clearTimeout(fabDockTimerRef.current);
+    }
+    setIsTemplatePickerOpen(false);
+    setIsFabDocked(true);
+  }
+
+  function handleFabPress() {
+    openTemplatePicker();
   }
 
   function dateFromDateKeyOrToday(dateKey?: string): Date {
@@ -1125,12 +1701,21 @@ export function HomeScreen() {
   }
 
   function openReminderModal() {
+    setReminderPanel("daily");
+    setDailyReminderTaskPage(hasPeriodicReminderTasks ? "periodic" : "single");
     setReminderEnabledDraft(notificationSettings.enabled);
     setReminderHourDraft(pad2(notificationSettings.hour));
     setReminderMinuteDraft(pad2(notificationSettings.minute));
-    setReminderRepeatDraft(notificationSettings.repeatRule);
     setReminderDateModeDraft(notificationSettings.dateMode);
     setReminderTaskIdsDraft(notificationSettings.taskIds.filter((taskId) => dailyTaskIdSet.has(taskId)));
+    setLongtermReminderEnabledDraft(longtermNotificationSettings.enabled);
+    setLongtermReminderHourDraft(pad2(longtermNotificationSettings.hour));
+    setLongtermReminderMinuteDraft(pad2(longtermNotificationSettings.minute));
+    setLongtermReminderTaskIdsDraft(
+      longtermNotificationSettings.taskIds.filter((taskId) => longtermTaskIdSet.has(taskId))
+    );
+    setLongtermReminderOffsetsDraft(longtermNotificationSettings.deadlineOffsets);
+    setLongtermReminderIntervalDraft(longtermNotificationSettings.intervalRule);
     setIsReminderOpen(true);
   }
 
@@ -1163,15 +1748,59 @@ export function HomeScreen() {
       enabled: reminderEnabledDraft,
       hour: Math.round(hourParsed),
       minute: Math.round(minuteParsed),
-      taskIds: reminderTaskIdsDraft.filter((taskId) => dailyTaskIdSet.has(taskId)),
+      taskIds: reminderTaskIdsDraft.filter((taskId) => reminderTaskOptionIdSet.has(taskId)),
       dateMode: reminderDateModeDraft,
-      repeatRule: reminderRepeatDraft
+      repeatRule: "once" as NotificationRepeatRule
     };
+    const normalizedMode: NotificationMode = hasPeriodicReminderTasks ? "follow_task" : "global_rule";
+    const normalizedRepeatRule = hasPeriodicReminderTasks ? nextSettings.repeatRule : "once";
+    const selectedTaskItems = reminderTaskOptions.filter((task) => nextSettings.taskIds.includes(task.id));
+    const periodicTaskIds = selectedTaskItems
+      .filter((task) => typeof task.autoRule === "string")
+      .map((task) => task.id);
+    const singleTaskIds = selectedTaskItems
+      .filter((task) => typeof task.autoRule !== "string")
+      .map((task) => task.id);
+    const normalizedTaskIds =
+      [...periodicTaskIds, ...singleTaskIds];
     if (
-      nextSettings.repeatRule === "once" &&
+      normalizedRepeatRule === "once" &&
       buildOnceReminderDate(nextSettings.dateMode, nextSettings.hour, nextSettings.minute).getTime() <= Date.now()
     ) {
       Alert.alert("时间已过", "单次提醒请设置为未来时间");
+      return;
+    }
+    const longtermHourParsed = Number(longtermReminderHourDraft);
+    const longtermMinuteParsed = Number(longtermReminderMinuteDraft);
+    if (
+      !Number.isFinite(longtermHourParsed) ||
+      !Number.isFinite(longtermMinuteParsed) ||
+      longtermHourParsed < 0 ||
+      longtermHourParsed > 23 ||
+      longtermMinuteParsed < 0 ||
+      longtermMinuteParsed > 59
+    ) {
+      Alert.alert("输入有误", "长期提醒时间请输入 00:00 到 23:59");
+      return;
+    }
+    const longtermSettings = {
+      enabled: longtermReminderEnabledDraft,
+      hour: Math.round(longtermHourParsed),
+      minute: Math.round(longtermMinuteParsed),
+      taskIds: longtermReminderTaskIdsDraft.filter((taskId) => longtermReminderTaskOptionIdSet.has(taskId)),
+      deadlineOffsets: longtermReminderOffsetsDraft,
+      intervalRule: longtermReminderIntervalDraft
+    };
+    if (longtermSettings.enabled && longtermSettings.taskIds.length === 0) {
+      Alert.alert("未设置长期提醒任务", "请至少勾选 1 个带截止日期的长期任务");
+      return;
+    }
+    if (
+      longtermSettings.enabled &&
+      longtermSettings.deadlineOffsets.length === 0 &&
+      longtermSettings.intervalRule === "none"
+    ) {
+      Alert.alert("未设置提醒规则", "请至少开启一个截止日前提醒或周期提醒");
       return;
     }
     dispatch({
@@ -1179,16 +1808,44 @@ export function HomeScreen() {
       enabled: nextSettings.enabled,
       hour: nextSettings.hour,
       minute: nextSettings.minute,
-      taskIds: nextSettings.taskIds,
+      taskIds: normalizedTaskIds,
+      mode: normalizedMode,
       dateMode: nextSettings.dateMode,
-      repeatRule: nextSettings.repeatRule
+      repeatRule: normalizedRepeatRule
+    });
+    dispatch({
+      type: "SET_LONGTERM_NOTIFICATION_SETTINGS",
+      enabled: longtermSettings.enabled,
+      hour: longtermSettings.hour,
+      minute: longtermSettings.minute,
+      taskIds: longtermSettings.taskIds,
+      deadlineOffsets: longtermSettings.deadlineOffsets,
+      intervalRule: longtermSettings.intervalRule
     });
     const modeText =
-      nextSettings.repeatRule === "once"
-        ? `${dateModeLabel(nextSettings.dateMode)} ${pad2(nextSettings.hour)}:${pad2(nextSettings.minute)}`
-        : `${repeatRuleLabel(nextSettings.repeatRule)} ${pad2(nextSettings.hour)}:${pad2(nextSettings.minute)}`;
-    showShortNotice(`提醒设置已保存 ${modeText}`);
+      normalizedMode === "follow_task"
+        ? `跟随任务周期 ${pad2(nextSettings.hour)}:${pad2(nextSettings.minute)}`
+        : normalizedRepeatRule === "once"
+          ? `${dateModeLabel(nextSettings.dateMode)} ${pad2(nextSettings.hour)}:${pad2(nextSettings.minute)}`
+          : `${repeatRuleLabel(normalizedRepeatRule)} ${pad2(nextSettings.hour)}:${pad2(nextSettings.minute)}`;
+    showShortNotice(`提醒设置已保存 ${modeText}｜长期 ${pad2(longtermSettings.hour)}:${pad2(longtermSettings.minute)}`);
     setIsReminderOpen(false);
+  }
+
+  function toggleLongtermReminderTask(taskId: string) {
+    setLongtermReminderTaskIdsDraft((prev) =>
+      prev.includes(taskId) ? prev.filter((id) => id !== taskId) : [...prev, taskId]
+    );
+  }
+
+  function toggleLongtermReminderOffset(offset: number) {
+    setLongtermReminderOffsetsDraft((prev) => {
+      const exists = prev.includes(offset);
+      if (exists) {
+        return prev.filter((item) => item !== offset);
+      }
+      return [...prev, offset].sort((a, b) => b - a);
+    });
   }
 
   function handleDeleteGroup() {
@@ -1241,6 +1898,17 @@ export function HomeScreen() {
     setReminderTaskIdsDraft((prev) =>
       prev.includes(taskId) ? prev.filter((id) => id !== taskId) : [...prev, taskId]
     );
+  }
+
+  function togglePeriodicReminderTemplate(taskIds: string[]) {
+    setReminderTaskIdsDraft((prev) => {
+      const allSelected = taskIds.every((taskId) => prev.includes(taskId));
+      if (allSelected) {
+        return prev.filter((taskId) => !taskIds.includes(taskId));
+      }
+      const merged = new Set([...prev, ...taskIds]);
+      return Array.from(merged);
+    });
   }
 
   function isTemplateSaved(task: Task): boolean {
@@ -1826,7 +2494,7 @@ export function HomeScreen() {
           </View>
           {activeChart === "line" ? (
             <>
-              <Text style={styles.sectionMeta}>{`今日 ${recentScores[recentScores.length - 1]} 分`}</Text>
+              <Text style={styles.sectionMeta}>{`今日 ${recentScores[todayTrendIndex] ?? 0} 分`}</Text>
               <View
                 style={styles.lineChart}
                 onLayout={(event) => setLineChartWidth(event.nativeEvent.layout.width)}
@@ -1846,7 +2514,10 @@ export function HomeScreen() {
                       const dx = x2 - x1;
                       const dy = y2 - y1;
                       const length = Math.sqrt(dx * dx + dy * dy);
-                      const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+                      const angleRad = Math.atan2(dy, dx);
+                      const angle = (angleRad * 180) / Math.PI;
+                      const adjustedLeft = x1 + (length / 2) * (Math.cos(angleRad) - 1);
+                      const adjustedTop = y1 + (length / 2) * Math.sin(angleRad);
                       return (
                         <View
                           key={`line_${index}`}
@@ -1854,8 +2525,8 @@ export function HomeScreen() {
                             styles.lineSegment,
                             {
                               width: length,
-                              left: x1,
-                              top: y1,
+                              left: adjustedLeft,
+                              top: adjustedTop,
                               transform: [{ rotate: `${angle}deg` }],
                               backgroundColor: activeGroupColor
                             }
@@ -1871,6 +2542,8 @@ export function HomeScreen() {
                       const x = chartPadding + (usableWidth * index) / (recentScores.length - 1);
                       const y = chartPadding + (1 - value / recentMax) * usableHeight;
                       const dateKey = recentDates[index];
+                      const isTodayPoint = index === todayTrendIndex;
+                      const pointSize = isTodayPoint ? 12 : 8;
                       return (
                         <Pressable
                           key={`point_${index}`}
@@ -1878,7 +2551,12 @@ export function HomeScreen() {
                           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                           style={pressable([
                             styles.linePoint,
-                            { left: x - 4, top: y - 4, backgroundColor: activeGroupColor }
+                            isTodayPoint && styles.linePointToday,
+                            {
+                              left: x - pointSize / 2,
+                              top: y - pointSize / 2,
+                              backgroundColor: activeGroupColor
+                            }
                           ])}
                         />
                       );
@@ -1908,15 +2586,12 @@ export function HomeScreen() {
                   if (!cell.isCurrentMonth || cell.dayNumber === null) {
                     return <View key={cell.key} style={styles.calendarCell} />;
                   }
-                  const ratio =
-                    calendarData.maxScore > 0 && cell.score > 0 ? cell.score / calendarData.maxScore : 0;
-                  const normalizedRatio = Math.max(0, Math.min(1, ratio));
-                  const intensity =
-                    cell.score <= 0 ? 0 : 0.2 + 0.8 * Math.pow(normalizedRatio, 0.85);
+                  const normalizedScore = Math.max(0, Math.min(1, cell.score / 20));
+                  const intensity = cell.score <= 0 ? 0 : 0.2 + 0.8 * Math.pow(normalizedScore, 0.85);
                   const heatColor =
                     intensity === 0
                       ? theme.colors.background
-                      : hexToRgba(activeGroupColor, 0.16 + intensity * 0.82);
+                      : hexToRgba(CALENDAR_HEAT_BASE_COLOR, 0.16 + intensity * 0.82);
                   const textColor = intensity >= 0.6 ? "#FFFFFF" : theme.colors.text;
                   return (
                     <Pressable
@@ -1932,7 +2607,7 @@ export function HomeScreen() {
                             borderColor:
                               intensity === 0
                                 ? theme.colors.border
-                                : hexToRgba(activeGroupColor, 0.45 + intensity * 0.4)
+                                : hexToRgba(CALENDAR_HEAT_BASE_COLOR, 0.45 + intensity * 0.4)
                           }
                         ]}
                       >
@@ -1948,9 +2623,36 @@ export function HomeScreen() {
 
       </ScrollView>
 
-      <Pressable style={pressable(styles.fab)} onPress={() => setIsTemplatePickerOpen(true)}>
-        <Text style={styles.fabText}>🏬</Text>
-      </Pressable>
+      <Animated.View
+        style={[
+          styles.fabWrap,
+          {
+            opacity: fabDockAnim.interpolate({
+              inputRange: [0, 1],
+              outputRange: [0.94, 0.66]
+            }),
+            transform: [
+              {
+                translateX: fabDockAnim.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [0, 28]
+                })
+              }
+            ]
+          }
+        ]}
+      >
+        <Pressable
+          style={pressable([styles.fab, isFabDocked && styles.fabDocked])}
+          onPress={handleFabPress}
+          accessibilityLabel="打开任务库"
+        >
+          <View style={styles.fabIconStack}>
+            <View style={[styles.fabIconCard, styles.fabIconCardBack]} />
+            <View style={styles.fabIconCard} />
+          </View>
+        </Pressable>
+      </Animated.View>
 
       {noticeText ? (
         <Animated.View
@@ -1975,11 +2677,11 @@ export function HomeScreen() {
 
       <Modal visible={isTemplatePickerOpen} transparent animationType="fade">
         <View style={styles.modalBackdrop}>
-          <Pressable style={styles.modalBackdropPress} onPress={() => setIsTemplatePickerOpen(false)} />
+          <Pressable style={styles.modalBackdropPress} onPress={closeTemplatePicker} />
           <View style={styles.modalSheet}>
             <View style={styles.modalHeader}>
               <Text style={styles.sectionTitle}>任务库</Text>
-              <Pressable onPress={() => setIsTemplatePickerOpen(false)} style={pressable(styles.linkButton)}>
+              <Pressable onPress={closeTemplatePicker} style={pressable(styles.linkButton)}>
                 <Text style={styles.linkText}>关闭</Text>
               </Pressable>
             </View>
@@ -2181,123 +2883,299 @@ export function HomeScreen() {
           <Pressable style={styles.modalBackdropPress} onPress={() => setIsReminderOpen(false)} />
           <View style={[styles.modalSheet, styles.reminderModalSheet]}>
             <View style={styles.modalHeader}>
-              <Text style={styles.sectionTitle}>通知设置</Text>
+              <View style={styles.reminderHeaderMain}>
+                <Text style={styles.sectionTitle}>通知设置</Text>
+                <View style={styles.chartTabs}>
+                  {[
+                    { key: "daily", label: "短期" },
+                    { key: "longterm", label: "长期" }
+                  ].map((item) => {
+                    const isActive = reminderPanel === item.key;
+                    return (
+                      <Pressable
+                        key={item.key}
+                        onPress={() => setReminderPanel(item.key as "daily" | "longterm")}
+                        style={pressable([styles.chartTab, isActive && styles.chartTabActive])}
+                      >
+                        <Text style={[styles.chartTabText, isActive && styles.chartTabTextActive]}>{item.label}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
               <Pressable onPress={() => setIsReminderOpen(false)} style={pressable(styles.linkButton)}>
                 <Text style={styles.linkText}>关闭</Text>
               </Pressable>
             </View>
-            <Pressable
-              onPress={() => setReminderEnabledDraft((prev) => !prev)}
-              style={pressable([styles.toggleRow, reminderEnabledDraft && styles.toggleRowActive])}
-            >
-              <Text style={styles.taskTitle}>开启提醒</Text>
-              <View style={[styles.togglePill, reminderEnabledDraft && styles.togglePillActive]}>
-                <Text style={[styles.togglePillText, reminderEnabledDraft && styles.togglePillTextActive]}>
-                  {reminderEnabledDraft ? "开" : "关"}
-                </Text>
-              </View>
-            </Pressable>
-            <Text style={styles.sectionMeta}>{`当前提醒 ${reminderSummary}`}</Text>
-            <Text style={[styles.sectionTitle, !reminderEnabledDraft && styles.muted]}>周期设置</Text>
-            <View style={[styles.typeRow, !reminderEnabledDraft && styles.sectionDisabled]}>
-              {REMINDER_REPEAT_OPTIONS.map((item) => {
-                const isActive = reminderRepeatDraft === item.value;
-                return (
-                  <Pressable
-                    key={item.value}
-                    onPress={() => setReminderRepeatDraft(item.value)}
-                    style={pressable([styles.typeChip, isActive && styles.typeChipActive])}
-                  >
-                    <Text style={[styles.typeChipText, isActive && styles.typeChipTextActive]}>
-                      {item.label}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-            {reminderRepeatDraft === "once" ? (
+            {reminderPanel === "daily" ? (
               <>
-                <Text style={[styles.sectionMeta, !reminderEnabledDraft && styles.muted]}>单次提醒日期</Text>
-                <View style={[styles.typeRow, !reminderEnabledDraft && styles.sectionDisabled]}>
-                  {REMINDER_DATE_OPTIONS.map((item) => {
-                    const isActive = reminderDateModeDraft === item.value;
+                <Pressable
+                  onPress={() => setReminderEnabledDraft((prev) => !prev)}
+                  style={pressable(styles.reminderSwitchRow)}
+                >
+                  <Text style={styles.reminderSwitchLabel}>短期提醒</Text>
+                  <View style={[styles.togglePill, reminderEnabledDraft && styles.togglePillActive]}>
+                    <Text style={[styles.togglePillText, reminderEnabledDraft && styles.togglePillTextActive]}>
+                      {reminderEnabledDraft ? "开" : "关"}
+                    </Text>
+                  </View>
+                </Pressable>
+                <Text style={styles.sectionMeta}>{`当前 ${reminderSummary}`}</Text>
+                <View style={[styles.chartTabs, styles.reminderSubTabs]}>
+                  {[{ key: "periodic", label: "周期任务" }, { key: "single", label: "单次任务" }].map((item) => {
+                    const isActive = dailyReminderTaskPage === item.key;
+                    const disabled = item.key === "periodic" && !hasPeriodicReminderTasks;
+                    return (
+                      <Pressable
+                        key={item.key}
+                        onPress={() => {
+                          if (disabled) return;
+                          setDailyReminderTaskPage(item.key as "periodic" | "single");
+                        }}
+                        style={pressable([
+                          styles.chartTab,
+                          isActive && styles.chartTabActive,
+                          disabled && styles.sectionDisabled
+                        ])}
+                      >
+                        <Text style={[styles.chartTabText, isActive && styles.chartTabTextActive]}>{item.label}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+                {dailyReminderTaskPage === "periodic" ? (
+                  hasPeriodicReminderTasks ? (
+                    <Text style={[styles.sectionMeta, !reminderEnabledDraft && styles.muted]}>
+                      周期任务将自动跟随任务周期（每日/工作日/周末）
+                    </Text>
+                  ) : (
+                    <View style={[styles.reminderHintPill, !reminderEnabledDraft && styles.sectionDisabled]}>
+                      <Text style={styles.reminderHintPillText}>暂无周期任务</Text>
+                    </View>
+                  )
+                ) : (
+                  <>
+                    <Text style={[styles.sectionMeta, !reminderEnabledDraft && styles.muted]}>单次提醒日期</Text>
+                    <View style={[styles.reminderOptionRow, !reminderEnabledDraft && styles.sectionDisabled]}>
+                      {REMINDER_DATE_OPTIONS.map((item) => {
+                        const isActive = reminderDateModeDraft === item.value;
+                        return (
+                          <Pressable
+                            key={item.value}
+                            onPress={() => setReminderDateModeDraft(item.value)}
+                            style={pressable([
+                              styles.reminderOptionChip,
+                              isActive && styles.reminderOptionChipActive
+                            ])}
+                          >
+                            <Text style={[styles.reminderOptionChipText, isActive && styles.reminderOptionChipTextActive]}>
+                              {item.label}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                  </>
+                )}
+                <Text style={[styles.sectionMeta, !reminderEnabledDraft && styles.muted]}>提醒时间</Text>
+                <View style={[styles.reminderTimeRow, !reminderEnabledDraft && styles.sectionDisabled]}>
+                  <TextInput
+                    value={reminderHourDraft}
+                    onChangeText={setReminderHourDraft}
+                    placeholder="时"
+                    placeholderTextColor={theme.colors.muted}
+                    keyboardType="number-pad"
+                    style={[styles.input, styles.inputSmall]}
+                  />
+                  <Text style={styles.sectionTitle}>:</Text>
+                  <TextInput
+                    value={reminderMinuteDraft}
+                    onChangeText={setReminderMinuteDraft}
+                    placeholder="分"
+                    placeholderTextColor={theme.colors.muted}
+                    keyboardType="number-pad"
+                    style={[styles.input, styles.inputSmall]}
+                  />
+                </View>
+                <Text style={[styles.sectionTitle, !reminderEnabledDraft && styles.muted]}>选择任务</Text>
+                <ScrollView style={[styles.reminderList, !reminderEnabledDraft && styles.sectionDisabled]}>
+                  {dailyReminderTaskPage === "periodic" ? (
+                    periodicReminderDisplayOptions.length === 0 ? (
+                      <Text style={styles.muted}>暂无周期任务</Text>
+                    ) : (
+                      periodicReminderDisplayOptions.map((task) => {
+                        const checked = task.taskIds.every((taskId) => reminderTaskIdsDraft.includes(taskId));
+                        return (
+                          <Pressable
+                            key={task.key}
+                            onPress={() => togglePeriodicReminderTemplate(task.taskIds)}
+                            style={pressable([styles.reminderTaskRow, checked && styles.reminderTaskRowActive])}
+                          >
+                            <View style={[styles.reminderTaskCheck, checked && styles.reminderTaskCheckActive]} />
+                            <View style={styles.taskMainColumn}>
+                              <Text style={styles.reminderTaskTitle} numberOfLines={2} ellipsizeMode="tail">
+                                {task.title}
+                              </Text>
+                              <Text style={styles.reminderTaskMeta} numberOfLines={1} ellipsizeMode="tail">
+                                {`最高 ${task.maxPoints} 分 · 任务组 ${getGroupName(task.groupId)} · 周期 ${getAutoRuleLabel(task.autoRule)} · 已合并`}
+                              </Text>
+                            </View>
+                          </Pressable>
+                        );
+                      })
+                    )
+                  ) : singleReminderTaskOptions.length === 0 ? (
+                    <Text style={styles.muted}>暂无可提醒任务</Text>
+                  ) : (
+                    singleReminderTaskOptions.map((task) => {
+                      const checked = reminderTaskIdsDraft.includes(task.id);
+                      return (
+                        <Pressable
+                          key={task.id}
+                          onPress={() => toggleReminderTask(task.id)}
+                          style={pressable([styles.reminderTaskRow, checked && styles.reminderTaskRowActive])}
+                        >
+                          <View style={[styles.reminderTaskCheck, checked && styles.reminderTaskCheckActive]} />
+                          <View style={styles.taskMainColumn}>
+                            <Text style={styles.reminderTaskTitle} numberOfLines={2} ellipsizeMode="tail">
+                              {task.title}
+                            </Text>
+                            <Text style={styles.reminderTaskMeta} numberOfLines={1} ellipsizeMode="tail">
+                              {`最高 ${task.maxPoints} 分 · 任务组 ${getGroupName(task.groupId)} · 目标日 ${
+                                task.targetDate === todayKey
+                                  ? "今天"
+                                  : task.targetDate === tomorrowKey
+                                    ? "明天"
+                                    : task.targetDate || "未设置"
+                              }`}
+                            </Text>
+                          </View>
+                        </Pressable>
+                      );
+                    })
+                  )}
+                </ScrollView>
+                <View style={styles.reminderTestRow}>
+                  {dailyReminderTaskPage === "periodic" ? (
+                    <Pressable
+                      onPress={() => handleTestReminderNotification("periodic")}
+                      style={pressable([styles.reminderTestButton])}
+                    >
+                      <Text style={styles.reminderTestButtonText}>测试周期任务</Text>
+                    </Pressable>
+                  ) : (
+                    <Pressable
+                      onPress={() => handleTestReminderNotification("single")}
+                      style={pressable([styles.reminderTestButton])}
+                    >
+                      <Text style={styles.reminderTestButtonText}>测试单次任务</Text>
+                    </Pressable>
+                  )}
+                </View>
+              </>
+            ) : (
+              <>
+                <Pressable
+                  onPress={() => setLongtermReminderEnabledDraft((prev) => !prev)}
+                  style={pressable(styles.reminderSwitchRow)}
+                >
+                  <Text style={styles.reminderSwitchLabel}>长期提醒</Text>
+                  <View style={[styles.togglePill, longtermReminderEnabledDraft && styles.togglePillActive]}>
+                    <Text style={[styles.togglePillText, longtermReminderEnabledDraft && styles.togglePillTextActive]}>
+                      {longtermReminderEnabledDraft ? "开" : "关"}
+                    </Text>
+                  </View>
+                </Pressable>
+                <Text style={styles.sectionMeta}>{`当前 ${longtermReminderSummary}`}</Text>
+                <Text style={[styles.sectionMeta, !longtermReminderEnabledDraft && styles.muted]}>长期提醒时间</Text>
+                <View style={[styles.reminderTimeRow, !longtermReminderEnabledDraft && styles.sectionDisabled]}>
+                  <TextInput
+                    value={longtermReminderHourDraft}
+                    onChangeText={setLongtermReminderHourDraft}
+                    placeholder="时"
+                    placeholderTextColor={theme.colors.muted}
+                    keyboardType="number-pad"
+                    style={[styles.input, styles.inputSmall]}
+                  />
+                  <Text style={styles.sectionTitle}>:</Text>
+                  <TextInput
+                    value={longtermReminderMinuteDraft}
+                    onChangeText={setLongtermReminderMinuteDraft}
+                    placeholder="分"
+                    placeholderTextColor={theme.colors.muted}
+                    keyboardType="number-pad"
+                    style={[styles.input, styles.inputSmall]}
+                  />
+                </View>
+                <Text style={[styles.sectionTitle, !longtermReminderEnabledDraft && styles.muted]}>截止日前提醒</Text>
+                <View style={[styles.reminderOptionRow, !longtermReminderEnabledDraft && styles.sectionDisabled]}>
+                  {LONGTERM_DEADLINE_OFFSET_OPTIONS.map((item) => {
+                    const isActive = longtermReminderOffsetsDraft.includes(item.value);
                     return (
                       <Pressable
                         key={item.value}
-                        onPress={() => setReminderDateModeDraft(item.value)}
-                        style={pressable([styles.typeChip, isActive && styles.typeChipActive])}
+                        onPress={() => toggleLongtermReminderOffset(item.value)}
+                        style={pressable([
+                          styles.reminderOptionChip,
+                          isActive && styles.reminderOptionChipActive
+                        ])}
                       >
-                        <Text style={[styles.typeChipText, isActive && styles.typeChipTextActive]}>
+                        <Text style={[styles.reminderOptionChipText, isActive && styles.reminderOptionChipTextActive]}>
                           {item.label}
                         </Text>
                       </Pressable>
                     );
                   })}
                 </View>
+                <Text style={[styles.sectionTitle, !longtermReminderEnabledDraft && styles.muted]}>周期跟进提醒</Text>
+                <View style={[styles.reminderOptionRow, !longtermReminderEnabledDraft && styles.sectionDisabled]}>
+                  {LONGTERM_INTERVAL_OPTIONS.map((item) => {
+                    const isActive = longtermReminderIntervalDraft === item.value;
+                    return (
+                      <Pressable
+                        key={item.value}
+                        onPress={() => setLongtermReminderIntervalDraft(item.value)}
+                        style={pressable([
+                          styles.reminderOptionChip,
+                          isActive && styles.reminderOptionChipActive
+                        ])}
+                      >
+                        <Text style={[styles.reminderOptionChipText, isActive && styles.reminderOptionChipTextActive]}>
+                          {item.label}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+                <Text style={[styles.sectionTitle, !longtermReminderEnabledDraft && styles.muted]}>选择长期任务</Text>
+                <ScrollView style={[styles.reminderList, !longtermReminderEnabledDraft && styles.sectionDisabled]}>
+                  {longtermReminderTaskOptions.length === 0 ? (
+                    <Text style={styles.muted}>暂无可提醒的长期任务（请先设置截止日期）</Text>
+                  ) : (
+                    longtermReminderTaskOptions.map((task) => {
+                      const checked = longtermReminderTaskIdsDraft.includes(task.id);
+                      return (
+                        <Pressable
+                          key={task.id}
+                          onPress={() => toggleLongtermReminderTask(task.id)}
+                          style={pressable([styles.reminderTaskRow, checked && styles.reminderTaskRowActive])}
+                        >
+                          <View style={[styles.reminderTaskCheck, checked && styles.reminderTaskCheckActive]} />
+                          <View style={styles.taskMainColumn}>
+                            <Text style={styles.reminderTaskTitle} numberOfLines={2} ellipsizeMode="tail">
+                              {task.title}
+                            </Text>
+                            <Text style={styles.reminderTaskMeta} numberOfLines={1} ellipsizeMode="tail">
+                              {`任务组 ${getGroupName(task.groupId)} · 截止日 ${task.deadlineDate}`}
+                            </Text>
+                          </View>
+                        </Pressable>
+                      );
+                    })
+                  )}
+                </ScrollView>
               </>
-            ) : null}
-            <Text style={[styles.sectionMeta, !reminderEnabledDraft && styles.muted]}>提醒时间</Text>
-            <View style={[styles.reminderTimeRow, !reminderEnabledDraft && styles.sectionDisabled]}>
-              <TextInput
-                value={reminderHourDraft}
-                onChangeText={setReminderHourDraft}
-                placeholder="时"
-                placeholderTextColor={theme.colors.muted}
-                keyboardType="number-pad"
-                style={[styles.input, styles.inputSmall]}
-              />
-              <Text style={styles.sectionTitle}>:</Text>
-              <TextInput
-                value={reminderMinuteDraft}
-                onChangeText={setReminderMinuteDraft}
-                placeholder="分"
-                placeholderTextColor={theme.colors.muted}
-                keyboardType="number-pad"
-                style={[styles.input, styles.inputSmall]}
-              />
-            </View>
-            <Text style={[styles.sectionTitle, !reminderEnabledDraft && styles.muted]}>选择需要提醒的任务</Text>
-            <Text style={[styles.sectionMeta, !reminderEnabledDraft && styles.muted]}>可多选</Text>
-            <ScrollView style={[styles.reminderList, !reminderEnabledDraft && styles.sectionDisabled]}>
-              {reminderTaskOptions.length === 0 ? (
-                <Text style={styles.muted}>暂无可提醒任务</Text>
-              ) : (
-                reminderTaskOptions.map((task) => {
-                  const checked = reminderTaskIdsDraft.includes(task.id);
-                  return (
-                    <Pressable
-                      key={task.id}
-                      onPress={() => toggleReminderTask(task.id)}
-                      style={pressable([styles.reminderTaskRow, checked && styles.reminderTaskRowActive])}
-                    >
-                      <View style={[styles.reminderTaskCheck, checked && styles.reminderTaskCheckActive]} />
-                      <View style={styles.taskMainColumn}>
-                        <Text
-                          style={styles.reminderTaskTitle}
-                          numberOfLines={2}
-                          ellipsizeMode="tail"
-                        >
-                          {task.title}
-                        </Text>
-                        <Text
-                          style={styles.reminderTaskMeta}
-                          numberOfLines={1}
-                          ellipsizeMode="tail"
-                        >
-                          {`${task.planType === "daily" ? "每日任务" : "长期任务"} · 最高 ${task.maxPoints} 分 · 任务组 ${getGroupName(task.groupId)}`}
-                        </Text>
-                      </View>
-                    </Pressable>
-                  );
-                })
-              )}
-            </ScrollView>
-            <Pressable
-              onPress={handleTestReminderNotification}
-              style={pressable([styles.typeChip, styles.standaloneChip])}
-            >
-              <Text style={styles.typeChipText}>立即测试（5秒）</Text>
-            </Pressable>
+            )}
             <Pressable onPress={handleSaveReminderSettings} style={pressable(styles.button)}>
               <Text style={styles.buttonText}>保存设置</Text>
             </Pressable>
@@ -2469,29 +3347,44 @@ export function HomeScreen() {
                 onPress={() => setIsCreateTemplateDropdownOpen((prev) => !prev)}
                 style={pressable(styles.templatePickButton)}
               >
-                <Text style={styles.templatePickIcon}>🏬</Text>
+                <Text style={styles.templatePickIcon}>≡</Text>
               </Pressable>
             </View>
-            {isCreateTemplateDropdownOpen ? (
-              <View style={styles.dropdownPanel}>
-                <ScrollView nestedScrollEnabled style={styles.dropdownScroll}>
-                  {createTaskTemplates.length === 0 ? (
-                    <Text style={styles.muted}>当前类型暂无任务库内容</Text>
-                  ) : (
-                    createTaskTemplates.map((template) => (
-                      <Pressable
-                        key={template.id}
-                        onPress={() => handlePickCreateTemplate(template)}
-                        style={pressable(styles.dropdownItem)}
-                      >
-                        <Text style={styles.taskTitle}>{template.title}</Text>
-                        <Text style={styles.taskMeta}>{`最高 ${template.maxPoints} 分 · 任务组 ${getGroupName(template.groupId)}`}</Text>
-                      </Pressable>
-                    ))
-                  )}
-                </ScrollView>
+            <Modal visible={isCreateTemplateDropdownOpen} transparent animationType="fade">
+              <View style={styles.dropdownModalBackdrop}>
+                <Pressable
+                  style={styles.modalBackdropPress}
+                  onPress={() => setIsCreateTemplateDropdownOpen(false)}
+                />
+                <View style={styles.dropdownModalCard}>
+                  <View style={styles.modalHeader}>
+                    <Text style={styles.sectionTitle}>选择任务库模板</Text>
+                    <Pressable
+                      onPress={() => setIsCreateTemplateDropdownOpen(false)}
+                      style={pressable(styles.linkButton)}
+                    >
+                      <Text style={styles.linkText}>关闭</Text>
+                    </Pressable>
+                  </View>
+                  <ScrollView nestedScrollEnabled style={styles.dropdownScroll}>
+                    {createTaskTemplates.length === 0 ? (
+                      <Text style={styles.muted}>当前类型暂无任务库内容</Text>
+                    ) : (
+                      createTaskTemplates.map((template) => (
+                        <Pressable
+                          key={template.id}
+                          onPress={() => handlePickCreateTemplate(template)}
+                          style={pressable(styles.dropdownItem)}
+                        >
+                          <Text style={styles.taskTitle}>{template.title}</Text>
+                          <Text style={styles.taskMeta}>{`最高 ${template.maxPoints} 分 · 任务组 ${getGroupName(template.groupId)}`}</Text>
+                        </Pressable>
+                      ))
+                    )}
+                  </ScrollView>
+                </View>
               </View>
-            ) : null}
+            </Modal>
             <TextInput
               value={taskDetailNote}
               onChangeText={setTaskDetailNote}
@@ -2965,6 +3858,17 @@ const styles = StyleSheet.create({
     borderColor: theme.colors.accent,
     backgroundColor: theme.colors.accentSoft
   },
+  reminderSwitchRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: theme.spacing.sm
+  },
+  reminderSwitchLabel: {
+    fontSize: theme.font.md,
+    color: theme.colors.text,
+    fontWeight: "600"
+  },
   togglePill: {
     minWidth: 44,
     borderRadius: 999,
@@ -2988,6 +3892,11 @@ const styles = StyleSheet.create({
   },
   sectionDisabled: {
     opacity: 0.5
+  },
+  sectionDivider: {
+    height: 1,
+    backgroundColor: theme.colors.border,
+    marginVertical: theme.spacing.sm
   },
   reminderList: {
     maxHeight: Math.min(420, SCREEN_HEIGHT * 0.5),
@@ -3016,6 +3925,32 @@ const styles = StyleSheet.create({
     marginTop: 2,
     lineHeight: 18
   },
+  reminderOptionRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginBottom: theme.spacing.sm
+  },
+  reminderOptionChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: theme.radius.md,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.background
+  },
+  reminderOptionChipActive: {
+    borderColor: theme.colors.accent,
+    backgroundColor: theme.colors.accentSoft
+  },
+  reminderOptionChipText: {
+    color: theme.colors.muted,
+    fontSize: theme.font.sm,
+    fontWeight: "600"
+  },
+  reminderOptionChipTextActive: {
+    color: theme.colors.accent
+  },
   reminderTaskCheck: {
     width: 16,
     height: 16,
@@ -3027,6 +3962,35 @@ const styles = StyleSheet.create({
   reminderTaskCheckActive: {
     backgroundColor: theme.colors.accent,
     borderColor: theme.colors.accent
+  },
+  reminderHintPill: {
+    alignSelf: "flex-start",
+    backgroundColor: theme.colors.background,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: 4,
+    marginBottom: theme.spacing.sm
+  },
+  reminderHintPillText: {
+    fontSize: theme.font.sm,
+    color: theme.colors.muted,
+    fontWeight: "600"
+  },
+  reminderTestButton: {
+    flex: 1,
+    paddingVertical: 8,
+    borderRadius: theme.radius.md,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.background,
+    alignItems: "center"
+  },
+  reminderTestButtonText: {
+    fontSize: theme.font.sm,
+    color: theme.colors.muted,
+    fontWeight: "600"
   },
   typeRow: {
     flexDirection: "row",
@@ -3103,6 +4067,26 @@ const styles = StyleSheet.create({
     backgroundColor: theme.colors.surface,
     marginBottom: theme.spacing.sm,
     overflow: "hidden"
+  },
+  dropdownModalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(6, 13, 18, 0.5)",
+    justifyContent: "center",
+    padding: theme.spacing.md
+  },
+  dropdownModalCard: {
+    width: "100%",
+    maxHeight: "68%",
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.radius.lg,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    padding: theme.spacing.md,
+    shadowColor: "#0B1F2A",
+    shadowOpacity: 0.16,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 4
   },
   dropdownScroll: {
     maxHeight: 220
@@ -3308,6 +4292,13 @@ const styles = StyleSheet.create({
     borderRadius: 4,
     backgroundColor: theme.colors.accent
   },
+  linePointToday: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    borderWidth: 2,
+    borderColor: "#FFFFFF"
+  },
   chartAxis: {
     flexDirection: "row",
     justifyContent: "space-between"
@@ -3336,14 +4327,18 @@ const styles = StyleSheet.create({
   chartTabTextActive: {
     color: theme.colors.accent
   },
-  fab: {
+  fabWrap: {
     position: "absolute",
     right: theme.spacing.lg,
-    bottom: theme.spacing.lg,
+    bottom: theme.spacing.lg
+  },
+  fab: {
     width: 56,
     height: 56,
     borderRadius: 28,
-    backgroundColor: "#2B2A27",
+    backgroundColor: hexToRgba("#2B2A27", 0.88),
+    borderWidth: 1,
+    borderColor: hexToRgba("#FFFFFF", 0.18),
     alignItems: "center",
     justifyContent: "center",
     shadowColor: "#0B1F2A",
@@ -3352,11 +4347,32 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 6 },
     elevation: 4
   },
-  fabText: {
-    color: "#FFFFFF",
-    fontSize: 32,
-    fontWeight: "600",
-    marginTop: -2
+  fabDocked: {
+    borderTopLeftRadius: 18,
+    borderBottomLeftRadius: 18,
+    borderTopRightRadius: 14,
+    borderBottomRightRadius: 14
+  },
+  fabIconStack: {
+    width: 22,
+    height: 18,
+    position: "relative"
+  },
+  fabIconCard: {
+    position: "absolute",
+    width: 16,
+    height: 12,
+    borderRadius: 3,
+    borderWidth: 1.6,
+    borderColor: "#FFFFFF",
+    backgroundColor: "transparent",
+    top: 4,
+    left: 3
+  },
+  fabIconCardBack: {
+    top: 1,
+    left: 0,
+    opacity: 0.72
   },
   noticeToast: {
     position: "absolute",
@@ -3516,6 +4532,11 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: theme.spacing.sm
   },
+  reminderHeaderMain: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing.sm
+  },
   modalActions: {
     flexDirection: "row",
     gap: 6
@@ -3530,6 +4551,14 @@ const styles = StyleSheet.create({
   },
   standaloneChip: {
     flex: 0,
+    marginBottom: theme.spacing.sm
+  },
+  reminderTestRow: {
+    flexDirection: "row",
+    gap: theme.spacing.sm
+  },
+  reminderSubTabs: {
+    marginTop: 2,
     marginBottom: theme.spacing.sm
   },
   modalActionText: {

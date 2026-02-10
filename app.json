@@ -2,7 +2,7 @@
   "expo": {
     "name": "Action+",
     "slug": "action-plus",
-    "version": "1.3.1",
+    "version": "1.4.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "backgroundColor": "#F4EFE6",
@@ -19,13 +19,16 @@
       "splash": {
         "backgroundColor": "#F4EFE6"
       },
-      "permissions": ["POST_NOTIFICATIONS", "SCHEDULE_EXACT_ALARM"]
+      "permissions": [
+        "POST_NOTIFICATIONS",
+        "SCHEDULE_EXACT_ALARM"
+      ]
     },
-    "owner": "ewwwzhi",
     "extra": {
       "eas": {
-        "projectId": "32993c22-070d-4a51-b609-722cd9a0f889"
+        "projectId": "a3fb3496-7ee0-48f2-a7c3-1eaa84282fe6"
       }
-    }
+    },
+    "owner": "zampix"
   }
 }

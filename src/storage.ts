@@ -5,6 +5,8 @@ import {
   DEFAULT_GROUP,
   DEFAULT_GROUP_ID,
   AutoRule,
+  LongtermNotificationSettings,
+  NotificationMode,
   NotificationDateMode,
   NotificationRepeatRule,
   NotificationSettings,
@@ -19,7 +21,7 @@ import {
 const STATE_KEY = "reward_plan_state_v1";
 
 const PLAN_TYPES: PlanType[] = ["daily", "longterm"];
-const AUTO_RULES: AutoRule[] = ["daily", "weekday", "monWedFri"];
+const AUTO_RULES: AutoRule[] = ["daily", "weekday", "weekend"];
 
 function formatLocalDate(date: Date): string {
   const year = date.getFullYear();
@@ -88,7 +90,13 @@ function normalizeTemplate(raw: unknown): TaskTemplate | null {
   const createdAt = Number.isFinite(data.createdAt) ? Number(data.createdAt) : Date.now();
   const maxSource = Number.isFinite(data.maxPoints) ? Number(data.maxPoints) : 0;
   const maxPoints = Math.max(0, Math.round(maxSource));
-  const autoRule = AUTO_RULES.includes(data.autoRule as AutoRule) ? (data.autoRule as AutoRule) : "daily";
+  const rawAutoRule = (raw as { autoRule?: unknown }).autoRule;
+  const autoRule: AutoRule =
+    rawAutoRule === "monWedFri"
+      ? "weekend"
+      : AUTO_RULES.includes(data.autoRule as AutoRule)
+        ? (data.autoRule as AutoRule)
+        : "daily";
   return {
     id: data.id,
     title: data.title,
@@ -153,12 +161,52 @@ function normalizeNotificationSettings(raw: unknown, tasks: Task[]): Notificatio
       taskIdsRaw.filter((id): id is string => typeof id === "string" && validTaskIdSet.has(id))
     )
   );
+  const rawMode = (raw as { mode?: unknown }).mode;
+  const mode: NotificationMode = rawMode === "follow_task" ? "follow_task" : "global_rule";
   const rawDateMode = (raw as { dateMode?: unknown }).dateMode;
   const dateMode: NotificationDateMode = rawDateMode === "today" ? "today" : "tomorrow";
   const rawRepeatRule = (raw as { repeatRule?: unknown }).repeatRule;
   const repeatRule: NotificationRepeatRule =
     rawRepeatRule === "once" || rawRepeatRule === "weekday" ? rawRepeatRule : "daily";
-  return { enabled, hour, minute, taskIds, dateMode, repeatRule };
+  return { enabled, hour, minute, taskIds, mode, dateMode, repeatRule };
+}
+
+function normalizeLongtermNotificationSettings(
+  raw: unknown,
+  tasks: Task[]
+): LongtermNotificationSettings {
+  if (!raw || typeof raw !== "object") {
+    return initialState.longtermNotificationSettings;
+  }
+  const data = raw as Partial<LongtermNotificationSettings>;
+  const enabled = typeof data.enabled === "boolean" ? data.enabled : false;
+  const hour = Number.isFinite(data.hour) ? Math.min(23, Math.max(0, Math.round(Number(data.hour)))) : 20;
+  const minute = Number.isFinite(data.minute)
+    ? Math.min(59, Math.max(0, Math.round(Number(data.minute))))
+    : 0;
+  const taskIdsRaw = Array.isArray(data.taskIds) ? data.taskIds : [];
+  const validTaskIdSet = new Set(
+    tasks.filter((task) => task.planType === "longterm" && typeof task.deadlineDate === "string").map((task) => task.id)
+  );
+  const taskIds = Array.from(
+    new Set(
+      taskIdsRaw.filter((id): id is string => typeof id === "string" && validTaskIdSet.has(id))
+    )
+  );
+  const allowedOffsets = new Set([0, 1, 3, 7]);
+  const offsetsRaw = Array.isArray(data.deadlineOffsets) ? data.deadlineOffsets : [7, 3, 1, 0];
+  const deadlineOffsets = Array.from(
+    new Set(
+      offsetsRaw
+        .map((offset) => (Number.isFinite(offset) ? Math.max(0, Math.round(Number(offset))) : -1))
+        .filter((offset) => allowedOffsets.has(offset))
+    )
+  ).sort((a, b) => b - a);
+  const intervalRule =
+    data.intervalRule === "weekly" || data.intervalRule === "every14Days" || data.intervalRule === "every30Days"
+      ? data.intervalRule
+      : "none";
+  return { enabled, hour, minute, taskIds, deadlineOffsets, intervalRule };
 }
 
 export async function loadState(): Promise<AppState> {
@@ -201,6 +249,10 @@ export async function loadState(): Promise<AppState> {
       archiveSettings: normalizeArchiveSettings((data as { archiveSettings?: unknown }).archiveSettings),
       notificationSettings: normalizeNotificationSettings(
         (data as { notificationSettings?: unknown }).notificationSettings,
+        tasks
+      ),
+      longtermNotificationSettings: normalizeLongtermNotificationSettings(
+        (data as { longtermNotificationSettings?: unknown }).longtermNotificationSettings,
         tasks
       )
     };

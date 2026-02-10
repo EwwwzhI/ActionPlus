@@ -1,5 +1,5 @@
 export type PlanType = "daily" | "longterm";
-export type AutoRule = "daily" | "weekday" | "monWedFri";
+export type AutoRule = "daily" | "weekday" | "weekend";
 
 export type Task = {
   id: string;
@@ -32,14 +32,26 @@ export type ArchiveSettings = {
 
 export type NotificationDateMode = "today" | "tomorrow";
 export type NotificationRepeatRule = "once" | "daily" | "weekday";
+export type NotificationMode = "global_rule" | "follow_task";
+export type LongtermReminderIntervalRule = "none" | "weekly" | "every14Days" | "every30Days";
 
 export type NotificationSettings = {
   enabled: boolean;
   hour: number;
   minute: number;
   taskIds: string[];
+  mode: NotificationMode;
   dateMode: NotificationDateMode;
   repeatRule: NotificationRepeatRule;
+};
+
+export type LongtermNotificationSettings = {
+  enabled: boolean;
+  hour: number;
+  minute: number;
+  taskIds: string[];
+  deadlineOffsets: number[];
+  intervalRule: LongtermReminderIntervalRule;
 };
 
 export type ScoreArchive = {
@@ -77,6 +89,7 @@ export type AppState = {
   archives: ScoreArchive[];
   archiveSettings: ArchiveSettings;
   notificationSettings: NotificationSettings;
+  longtermNotificationSettings: LongtermNotificationSettings;
 };
 
 export const initialState: AppState = {
@@ -91,8 +104,17 @@ export const initialState: AppState = {
     hour: 8,
     minute: 0,
     taskIds: [],
+    mode: "global_rule",
     dateMode: "tomorrow",
     repeatRule: "daily"
+  },
+  longtermNotificationSettings: {
+    enabled: false,
+    hour: 20,
+    minute: 0,
+    taskIds: [],
+    deadlineOffsets: [7, 3, 1, 0],
+    intervalRule: "weekly"
   }
 };
 
@@ -108,8 +130,18 @@ export type Action =
       hour: number;
       minute: number;
       taskIds: string[];
+      mode: NotificationMode;
       dateMode: NotificationDateMode;
       repeatRule: NotificationRepeatRule;
+    }
+  | {
+      type: "SET_LONGTERM_NOTIFICATION_SETTINGS";
+      enabled: boolean;
+      hour: number;
+      minute: number;
+      taskIds: string[];
+      deadlineOffsets: number[];
+      intervalRule: LongtermReminderIntervalRule;
     }
   | { type: "AUTO_ARCHIVE"; cycleDays: number; nextStart: string; endDate: string }
   | { type: "ADD_TASK"; task: Task }
@@ -191,6 +223,7 @@ export function reducer(state: AppState, action: Action): AppState {
       const hour = Math.min(23, Math.max(0, Math.round(action.hour)));
       const minute = Math.min(59, Math.max(0, Math.round(action.minute)));
       const taskIds = Array.from(new Set(action.taskIds.filter((id) => typeof id === "string" && id)));
+      const mode: NotificationMode = action.mode === "follow_task" ? "follow_task" : "global_rule";
       const dateMode = action.dateMode === "today" ? "today" : "tomorrow";
       const repeatRule =
         action.repeatRule === "once" || action.repeatRule === "weekday" ? action.repeatRule : "daily";
@@ -201,8 +234,40 @@ export function reducer(state: AppState, action: Action): AppState {
           hour,
           minute,
           taskIds,
+          mode,
           dateMode,
           repeatRule
+        }
+      };
+    }
+    case "SET_LONGTERM_NOTIFICATION_SETTINGS": {
+      const enabled = Boolean(action.enabled);
+      const hour = Math.min(23, Math.max(0, Math.round(action.hour)));
+      const minute = Math.min(59, Math.max(0, Math.round(action.minute)));
+      const taskIds = Array.from(new Set(action.taskIds.filter((id) => typeof id === "string" && id)));
+      const allowedOffsets = new Set([0, 1, 3, 7]);
+      const deadlineOffsets = Array.from(
+        new Set(
+          action.deadlineOffsets
+            .map((offset) => Math.max(0, Math.round(offset)))
+            .filter((offset) => allowedOffsets.has(offset))
+        )
+      ).sort((a, b) => b - a);
+      const intervalRule: LongtermReminderIntervalRule =
+        action.intervalRule === "weekly" ||
+        action.intervalRule === "every14Days" ||
+        action.intervalRule === "every30Days"
+          ? action.intervalRule
+          : "none";
+      return {
+        ...state,
+        longtermNotificationSettings: {
+          enabled,
+          hour,
+          minute,
+          taskIds,
+          deadlineOffsets,
+          intervalRule
         }
       };
     }
@@ -322,6 +387,10 @@ export function reducer(state: AppState, action: Action): AppState {
         notificationSettings: {
           ...state.notificationSettings,
           taskIds: state.notificationSettings.taskIds.filter((taskId) => taskId !== action.taskId)
+        },
+        longtermNotificationSettings: {
+          ...state.longtermNotificationSettings,
+          taskIds: state.longtermNotificationSettings.taskIds.filter((taskId) => taskId !== action.taskId)
         }
       };
     }
