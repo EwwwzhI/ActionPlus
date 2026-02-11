@@ -6,7 +6,7 @@
   <h3>本地优先的奖励与任务管理应用</h3>
   <p>强化行动与自我反馈的极简工具</p>
 
-  [![Version](https://img.shields.io/badge/version-v1.4.1-blue.svg)](https://github.com/EwwwzhI/ActionPlus/releases)
+  [![Version](https://img.shields.io/badge/version-v1.4.2-blue.svg)](https://github.com/EwwwzhI/ActionPlus/releases)
   [![Platform](https://img.shields.io/badge/platform-Android-lightgrey.svg)]()
 </div>
 

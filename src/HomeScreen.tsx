@@ -864,7 +864,12 @@ export function HomeScreen() {
 
   const settlementTasks = useMemo(() => {
     return dailyTasks
-      .filter((task) => typeof task.targetDate === "string" && task.targetDate <= todayKey)
+      .filter((task) => {
+        if (typeof task.targetDate !== "string") return false;
+        if (task.targetDate === todayKey) return true;
+        // Past tasks: only show if not yet settled
+        return task.targetDate < todayKey && task.earnedPoints === null;
+      })
       .sort((a, b) => {
         if (a.targetDate !== b.targetDate) return (b.targetDate ?? "").localeCompare(a.targetDate ?? "");
         return b.createdAt - a.createdAt;
